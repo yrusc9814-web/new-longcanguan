@@ -1,0 +1,17 @@
+name = "dafan-cloud-worker"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+
+# HouseholdHub Durable Object（占位，不含业务同步）
+[[durable_objects.bindings]]
+name = "HOUSEHOLD_HUB"
+class_name = "HouseholdHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["HouseholdHub"]
+
+# 私有对象存储（占位；bucket_name 需在部署前按环境替换）
+[[r2_buckets]]
+binding = "PRIVATE_BUCKET"
+bucket_name = "dafan-private-placeholder"

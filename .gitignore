@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+.wrangler/
+*.tsbuildinfo
+
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*

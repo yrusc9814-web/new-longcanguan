@@ -1,0 +1,26 @@
+{
+  "name": "@dafan/mobile-app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "搭饭小馆 Capacitor 移动端外壳（Google2 生产界面的原样迁移）",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cap:sync": "cap sync android",
+    "cap:open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor-community/sqlite": "7.0.3",
+    "@capacitor/android": "7.6.10",
+    "@capacitor/core": "7.6.10"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "7.6.10"
+  }
+}

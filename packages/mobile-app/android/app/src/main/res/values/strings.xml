@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">搭饭小馆</string>
+    <string name="title_activity_main">搭饭小馆</string>
+    <string name="package_name">com.dafan.xiaoguan</string>
+    <string name="custom_url_scheme">com.dafan.xiaoguan</string>
+</resources>

@@ -1,0 +1,23 @@
+{
+  "name": "@dafan/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "搭饭共享契约：保留端点 DTO、Prisma 模型清单与同步协议骨架",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types/index.ts",
+    "./contracts": "./src/contracts/index.ts",
+    "./sync": "./src/sync/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run"
+  }
+}
