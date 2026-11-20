@@ -3,7 +3,7 @@
  *
  * 生成方式：静态扫描 app/server/src/modules 下 register*Routes 的 app.<method>() 声明，
  * 只统计以 /api/v1/ 开头的接口；不计 GET /*（生产静态兜底）与 GET /uploads/*（文件读取）。
- * 结果：91 条 method+path，59 条 Google2 调用、24 条明确剔除、8 条待定。
+ * 结果：91 条方法与路径组合，61 条保留、30 条剔除。
  */
 export const UPSTREAM_COMMIT = 'e778d3bd3354123032e570e03ad85c6b19bd9ea4';
 
@@ -37,11 +37,13 @@ export type RetiredReason =
   | 'consumption'
   | 'diner-delete'
   | 'favorites'
+  | 'ingredient-adjust'
   | 'ingredient-logs'
   | 'inventory-logs'
   | 'onboarding'
   | 'plan-cancel'
   | 'recommendation-history'
+  | 'recommendation-meal-set'
   | 'record-favorite'
   | 'search'
   | 'shopping-generate'
@@ -49,6 +51,7 @@ export type RetiredReason =
   | 'shopping-list-update'
   | 'store-candidates'
   | 'trash'
+  | 'unused-detail'
   | 'upload-delete';
 
 export interface EndpointSpec {
@@ -61,7 +64,7 @@ export interface RetiredEndpointSpec extends EndpointSpec {
   readonly reason: RetiredReason;
 }
 
-/** 保留端点：Google2 生产入口或适配器实际调用。 */
+/** 保留端点：Google2 的生产调用，以及健康检查和设置更新。 */
 export const RETAINED_ENDPOINTS = [
   { method: 'GET', path: '/api/v1/backups/export', domain: 'backup' },
   { method: 'POST', path: '/api/v1/backups/restore', domain: 'backup' },
@@ -69,12 +72,12 @@ export const RETAINED_ENDPOINTS = [
   { method: 'GET', path: '/api/v1/diners', domain: 'diner' },
   { method: 'POST', path: '/api/v1/diners', domain: 'diner' },
   { method: 'PUT', path: '/api/v1/diners/:id', domain: 'diner' },
+  { method: 'GET', path: '/api/v1/health', domain: 'system' },
   { method: 'GET', path: '/api/v1/ingredients', domain: 'ingredient' },
   { method: 'POST', path: '/api/v1/ingredients', domain: 'ingredient' },
   { method: 'GET', path: '/api/v1/ingredients/:id', domain: 'ingredient' },
   { method: 'PUT', path: '/api/v1/ingredients/:id', domain: 'ingredient' },
   { method: 'DELETE', path: '/api/v1/ingredients/:id', domain: 'ingredient' },
-
   { method: 'POST', path: '/api/v1/ingredients/:id/consume', domain: 'ingredient' },
   { method: 'POST', path: '/api/v1/kitchen/recommend', domain: 'kitchen' },
   { method: 'GET', path: '/api/v1/plans', domain: 'plan' },
@@ -98,6 +101,7 @@ export const RETAINED_ENDPOINTS = [
   { method: 'POST', path: '/api/v1/recipes/:id/cook-checkin', domain: 'recipe' },
   { method: 'POST', path: '/api/v1/recommendations/random', domain: 'recommendation' },
   { method: 'GET', path: '/api/v1/settings', domain: 'settings' },
+  { method: 'PUT', path: '/api/v1/settings', domain: 'settings' },
   { method: 'GET', path: '/api/v1/settings/pin/session', domain: 'settings' },
   { method: 'PUT', path: '/api/v1/settings/pin', domain: 'settings' },
   { method: 'POST', path: '/api/v1/settings/pin/verify', domain: 'settings' },
@@ -155,6 +159,13 @@ export const RETIRED_ENDPOINTS = [
   { method: 'GET', path: '/api/v1/deleted-items', domain: 'trash', reason: 'trash' },
   { method: 'POST', path: '/api/v1/deleted-items/:id/restore', domain: 'trash', reason: 'trash' },
   { method: 'DELETE', path: '/api/v1/diners/:id', domain: 'diner', reason: 'diner-delete' },
+  { method: 'GET', path: '/api/v1/diners/:id', domain: 'diner', reason: 'unused-detail' },
+  {
+    method: 'POST',
+    path: '/api/v1/ingredients/:id/adjust',
+    domain: 'ingredient',
+    reason: 'ingredient-adjust',
+  },
   {
     method: 'GET',
     path: '/api/v1/ingredients/:id/logs',
@@ -162,6 +173,7 @@ export const RETIRED_ENDPOINTS = [
     reason: 'ingredient-logs',
   },
   { method: 'GET', path: '/api/v1/inventory/logs', domain: 'kitchen', reason: 'inventory-logs' },
+  { method: 'GET', path: '/api/v1/plans/:id', domain: 'plan', reason: 'unused-detail' },
   { method: 'POST', path: '/api/v1/plans/:id/cancel', domain: 'plan', reason: 'plan-cancel' },
   {
     method: 'POST',
@@ -187,6 +199,18 @@ export const RETIRED_ENDPOINTS = [
     domain: 'recommendation',
     reason: 'recommendation-history',
   },
+  {
+    method: 'POST',
+    path: '/api/v1/recommendations/:id/add-to-plan',
+    domain: 'recommendation',
+    reason: 'recommendation-history',
+  },
+  {
+    method: 'POST',
+    path: '/api/v1/recommendations/meal-set',
+    domain: 'recommendation',
+    reason: 'recommendation-meal-set',
+  },
   { method: 'GET', path: '/api/v1/search', domain: 'search', reason: 'search' },
   { method: 'GET', path: '/api/v1/favorites', domain: 'search', reason: 'favorites' },
   { method: 'POST', path: '/api/v1/settings/onboarding', domain: 'settings', reason: 'onboarding' },
@@ -210,6 +234,7 @@ export const RETIRED_ENDPOINTS = [
     reason: 'shopping-generate',
   },
   { method: 'GET', path: '/api/v1/stores/candidates', domain: 'store', reason: 'store-candidates' },
+  { method: 'GET', path: '/api/v1/tools/:id', domain: 'tool', reason: 'unused-detail' },
   {
     method: 'DELETE',
     path: '/api/v1/uploads/images/:id',
@@ -218,19 +243,7 @@ export const RETIRED_ENDPOINTS = [
   },
 ] as const satisfies readonly RetiredEndpointSpec[];
 
-/** 其余上游注册路由：Google2 未调用，剔除范围尚待确认。 */
-export const UNCLASSIFIED_ENDPOINTS = [
-  { method: 'GET', path: '/api/v1/diners/:id', domain: 'diner' },
-  { method: 'GET', path: '/api/v1/health', domain: 'system' },
-  { method: 'GET', path: '/api/v1/plans/:id', domain: 'plan' },
-  { method: 'GET', path: '/api/v1/tools/:id', domain: 'tool' },
-  { method: 'POST', path: '/api/v1/ingredients/:id/adjust', domain: 'ingredient' },
-  { method: 'POST', path: '/api/v1/recommendations/:id/add-to-plan', domain: 'recommendation' },
-  { method: 'POST', path: '/api/v1/recommendations/meal-set', domain: 'recommendation' },
-  { method: 'PUT', path: '/api/v1/settings', domain: 'settings' },
-] as const satisfies readonly EndpointSpec[];
-
 /** 上游声明的全部 API 端点。 */
 export function upstreamEndpoints(): EndpointSpec[] {
-  return [...RETAINED_ENDPOINTS, ...RETIRED_ENDPOINTS, ...UNCLASSIFIED_ENDPOINTS];
+  return [...RETAINED_ENDPOINTS, ...RETIRED_ENDPOINTS];
 }
