@@ -11,11 +11,23 @@ describe('只读语句判定', () => {
     expect(isReadStatement('PRAGMA user_version')).toBe(true);
     expect(isReadStatement('PRAGMA table_info("Recipe")')).toBe(true);
     expect(isReadStatement('PRAGMA table_info("a=b")')).toBe(true);
+    expect(isReadStatement('PRAGMA main."table_info"("a=;b")')).toBe(true);
+    expect(isReadStatement("-- comment\nSELECT ';'; /* trailing comment */")).toBe(true);
+    expect(
+      isReadStatement(
+        'WITH RECURSIVE "a)"(n) AS NOT MATERIALIZED (VALUES (1)), b AS (SELECT 2) SELECT * FROM b',
+      ),
+    ).toBe(true);
   });
 
   it('PRAGMA 赋值、写语句与事务控制都不算只读', () => {
     expect(isReadStatement('PRAGMA user_version = 2')).toBe(false);
     expect(isReadStatement('PRAGMA foreign_keys = ON')).toBe(false);
+    expect(isReadStatement('PRAGMA main."foreign_keys"(OFF)')).toBe(false);
+    expect(isReadStatement('EXPLAIN PRAGMA foreign_keys = OFF')).toBe(false);
+    expect(isReadStatement('PRAGMA optimize')).toBe(false);
+    expect(isReadStatement('WITH c AS (SELECT 1) DELETE FROM "Recipe" RETURNING id')).toBe(false);
+    expect(isReadStatement('SELECT 1; DELETE FROM "Recipe"')).toBe(false);
     expect(isReadStatement('INSERT INTO "Recipe" DEFAULT VALUES')).toBe(false);
     expect(isReadStatement('UPDATE "Settings" SET "appName" = 1')).toBe(false);
     expect(isReadStatement('DELETE FROM "Recipe"')).toBe(false);

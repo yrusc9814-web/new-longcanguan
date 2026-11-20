@@ -32,6 +32,32 @@ function latch() {
   return { promise, resolve: release };
 }
 
+describe('只读查询入口', () => {
+  it('拒绝通过 CTE 修改业务数据或通过 PRAGMA 修改外键设置', async () => {
+    const handle = await freshMemoryDatabase();
+    try {
+      await insertRecipe(handle, 'r1', '番茄炒蛋');
+      await expect(
+        handle.query('WITH c AS (SELECT ?) DELETE FROM "Recipe" WHERE id IN c RETURNING id', [
+          'r1',
+        ]),
+      ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+      await handle.withWriteTransaction(async (tx) => {
+        await expect(tx.query('PRAGMA foreign_keys(OFF)')).rejects.toMatchObject({
+          code: 'INVALID_STATE',
+        });
+      });
+      await expect(handle.query('EXPLAIN PRAGMA foreign_keys = OFF')).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+      });
+      await expect(handle.query('PRAGMA foreign_keys')).resolves.toEqual([{ foreign_keys: 1 }]);
+      await expect(handle.query('SELECT id FROM "Recipe"')).resolves.toEqual([{ id: 'r1' }]);
+    } finally {
+      await handle.close();
+    }
+  });
+});
+
 describe('新库初始化', () => {
   it('空库一次建起 30 张表和 71 个索引，并写入 user_version=1', async () => {
     const handle = await freshMemoryDatabase();
