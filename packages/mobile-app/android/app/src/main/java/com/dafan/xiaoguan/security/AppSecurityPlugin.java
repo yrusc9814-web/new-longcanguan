@@ -1,0 +1,113 @@
+package com.dafan.xiaoguan.security;
+
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+
+import org.json.JSONObject;
+
+/**
+ * JS bridge for the local security gate.
+ *
+ * <p>Contract (see {@code src/native/app-security.ts}):</p>
+ * <ul>
+ *     <li>{@code getGateState()} -&gt; {@code {lockedPendingWipe, pinRequired, pinUnlocked}}</li>
+ *     <li>{@code setGateState({lockedPendingWipe?, pinRequired?, pinUnlocked?})} -&gt; same shape</li>
+ *     <li>{@code setMemberToken({memberToken})}, {@code getMemberToken() -&gt; {memberToken}},
+ *     {@code clearMemberToken()}</li>
+ * </ul>
+ *
+ * <p>This class only adapts Capacitor calls; all logic and its invariants live in
+ * {@link SecurityGateService}. No token value is ever placed in an error message or log.</p>
+ */
+@CapacitorPlugin(name = "AppSecurity")
+public final class AppSecurityPlugin extends Plugin {
+
+    @Override
+    public void load() {
+        SecurityRuntime.install(getContext());
+    }
+
+    @PluginMethod
+    public void getGateState(PluginCall call) {
+        call.resolve(toJs(service().getGateState()));
+    }
+
+    @PluginMethod
+    public void setGateState(PluginCall call) {
+        boolean valid =
+            hasBooleanOrAbsent(call, "lockedPendingWipe") &&
+            hasBooleanOrAbsent(call, "pinRequired") &&
+            hasBooleanOrAbsent(call, "pinUnlocked");
+        if (!valid) {
+            call.reject("Gate state fields must be booleans", "INVALID_GATE_STATE");
+            return;
+        }
+
+        Boolean lockedPendingWipe = call.getBoolean("lockedPendingWipe");
+        Boolean pinRequired = call.getBoolean("pinRequired");
+        Boolean pinUnlocked = call.getBoolean("pinUnlocked");
+
+        try {
+            call.resolve(toJs(service().setGateState(lockedPendingWipe, pinRequired, pinUnlocked)));
+        } catch (SecurityPersistenceException ex) {
+            call.reject("Unable to apply the local security gate", "GATE_UPDATE_FAILED");
+        }
+    }
+
+    @PluginMethod
+    public void getMemberToken(PluginCall call) {
+        try {
+            String token = service().getMemberToken();
+            JSObject result = new JSObject();
+            // JSONObject.NULL keeps the key present so the JS contract sees `null`, not `undefined`.
+            result.put("memberToken", token == null ? JSONObject.NULL : token);
+            call.resolve(result);
+        } catch (SecurityPersistenceException ex) {
+            call.reject("Unable to read the member token", "TOKEN_READ_FAILED");
+        }
+    }
+
+    @PluginMethod
+    public void setMemberToken(PluginCall call) {
+        String token = call.getString("memberToken");
+        try {
+            service().setMemberToken(token);
+            call.resolve();
+        } catch (IllegalArgumentException ex) {
+            call.reject("memberToken is required", "INVALID_TOKEN");
+        } catch (SecurityPersistenceException ex) {
+            call.reject("Unable to store the member token", "TOKEN_WRITE_FAILED");
+        }
+    }
+
+    @PluginMethod
+    public void clearMemberToken(PluginCall call) {
+        try {
+            service().clearMemberToken();
+            call.resolve();
+        } catch (SecurityPersistenceException ex) {
+            call.reject("Unable to clear the member token", "TOKEN_CLEAR_FAILED");
+        }
+    }
+
+    private SecurityGateService service() {
+        return SecurityRuntime.get(getContext()).gateService();
+    }
+
+    /** A field must be absent, JSON null, or a real boolean; anything else is a contract violation. */
+    private static boolean hasBooleanOrAbsent(PluginCall call, String name) {
+        Object value = call.getData().opt(name);
+        return value == null || value instanceof Boolean;
+    }
+
+    private static JSObject toJs(GateState state) {
+        JSObject result = new JSObject();
+        result.put("lockedPendingWipe", state.lockedPendingWipe());
+        result.put("pinRequired", state.pinRequired());
+        result.put("pinUnlocked", state.pinUnlocked());
+        return result;
+    }
+}

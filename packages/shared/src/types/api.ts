@@ -1,6 +1,7 @@
 export type ApiErrorCode =
   | 'VALIDATION_ERROR'
   | 'UNAUTHORIZED'
+  | 'MEMBER_REVOKED'
   | 'NOT_FOUND'
   | 'CONFLICT'
   | 'DATABASE_ERROR'

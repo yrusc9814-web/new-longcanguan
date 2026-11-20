@@ -1,0 +1,2690 @@
+{
+  "commit": "e778d3bd3354123032e570e03ad85c6b19bd9ea4",
+  "tables": {
+    "Settings": {
+      "columns": [
+        {
+          "name": "appName",
+          "type": "TEXT",
+          "notnull": true,
+          "default": "'搭饭小馆'",
+          "pk": 0
+        },
+        {
+          "name": "autoBackupEnabled",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "true",
+          "pk": 0
+        },
+        {
+          "name": "autoDeductInventory",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "defaultPort",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "8787",
+          "pk": 0
+        },
+        {
+          "name": "defaultRepeatDays",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "0",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 1
+        },
+        {
+          "name": "onboardingCompleted",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "pinEnabled",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "pinHash",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "subtitle",
+          "type": "TEXT",
+          "notnull": true,
+          "default": "'让每一餐都更美好'",
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "userAvatarPath",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "userNickname",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "version",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    "Diner": {
+      "columns": [
+        {
+          "name": "active",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "true",
+          "pk": 0
+        },
+        {
+          "name": "allergyText",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "avatarPath",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "dislikesText",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "likesText",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "portionNote",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "tabooText",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "version",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    "Ingredient": {
+      "columns": [
+        {
+          "name": "category",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "deletedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "expiryDate",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "imagePath",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "location",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "maxStock",
+          "type": "REAL",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "minStock",
+          "type": "REAL",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "opened",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "purchaseDate",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "quantity",
+          "type": "REAL",
+          "notnull": true,
+          "default": "0",
+          "pk": 0
+        },
+        {
+          "name": "unit",
+          "type": "TEXT",
+          "notnull": true,
+          "default": "'OTHER'",
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "version",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    "InventoryBatch": {
+      "columns": [
+        {
+          "name": "consumePriority",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "deletedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "expiryDate",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "ingredientId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "location",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "opened",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "purchaseDate",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "quantity",
+          "type": "REAL",
+          "notnull": true,
+          "default": "0",
+          "pk": 0
+        },
+        {
+          "name": "unit",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "version",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        }
+      ],
+      "foreignKeys": ["ingredientId->Ingredient.id[RESTRICT/CASCADE]"]
+    },
+    "InventoryLog": {
+      "columns": [
+        {
+          "name": "afterQuantity",
+          "type": "REAL",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "beforeQuantity",
+          "type": "REAL",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "changeQuantity",
+          "type": "REAL",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "changeType",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "ingredientId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "ingredientNameSnapshot",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "inventoryBatchId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "relatedPlanId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "relatedRecordId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "unit",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        "ingredientId->Ingredient.id[SET NULL/CASCADE]",
+        "inventoryBatchId->InventoryBatch.id[SET NULL/CASCADE]",
+        "relatedPlanId->MealPlan.id[SET NULL/CASCADE]",
+        "relatedRecordId->MealRecord.id[SET NULL/CASCADE]"
+      ]
+    },
+    "KitchenTool": {
+      "columns": [
+        {
+          "name": "category",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "deletedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "icon",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "imagePath",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "quantity",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "version",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    "MealPlan": {
+      "columns": [
+        {
+          "name": "completedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "deletedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "dinerCount",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        },
+        {
+          "name": "icon",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "mealType",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "planDate",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "notnull": true,
+          "default": "'UNPLANNED'",
+          "pk": 0
+        },
+        {
+          "name": "subtext",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "time",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "version",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    "MealPlanDiner": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "dinerId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "mealPlanId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        "dinerId->Diner.id[SET NULL/CASCADE]",
+        "mealPlanId->MealPlan.id[RESTRICT/CASCADE]"
+      ]
+    },
+    "MealPlanItem": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "customName",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "itemType",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "mealPlanId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "mealRole",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "recipeId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "sortOrder",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "0",
+          "pk": 0
+        },
+        {
+          "name": "storeId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        "mealPlanId->MealPlan.id[RESTRICT/CASCADE]",
+        "recipeId->Recipe.id[SET NULL/CASCADE]",
+        "storeId->Store.id[SET NULL/CASCADE]"
+      ]
+    },
+    "MealRecord": {
+      "columns": [
+        {
+          "name": "calories",
+          "type": "INTEGER",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "confirmedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "cost",
+          "type": "INTEGER",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "deletedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "favorite",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "imagePath",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "isNewTry",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "mealType",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "photosJson",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "rating",
+          "type": "REAL",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "recordDate",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "recordTime",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "relatedPlanId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "satiety",
+          "type": "INTEGER",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "sourceMealPlanId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "sourceType",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "notnull": true,
+          "default": "'CONFIRMED'",
+          "pk": 0
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "version",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        "relatedPlanId->MealPlan.id[SET NULL/CASCADE]",
+        "sourceMealPlanId->MealPlan.id[SET NULL/CASCADE]"
+      ]
+    },
+    "MealRecordDiner": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "dinerId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "mealRecordId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        "dinerId->Diner.id[SET NULL/CASCADE]",
+        "mealRecordId->MealRecord.id[RESTRICT/CASCADE]"
+      ]
+    },
+    "MealRecordItem": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "customName",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "itemType",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "mealRecordId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "mealRole",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "recipeId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "sortOrder",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "0",
+          "pk": 0
+        },
+        {
+          "name": "storeId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        "mealRecordId->MealRecord.id[RESTRICT/CASCADE]",
+        "recipeId->Recipe.id[SET NULL/CASCADE]",
+        "storeId->Store.id[SET NULL/CASCADE]"
+      ]
+    },
+    "Recipe": {
+      "columns": [
+        {
+          "name": "calories",
+          "type": "INTEGER",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "category",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "cookingTimeMinutes",
+          "type": "INTEGER",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "deletedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "difficulty",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "enabledForRecommendation",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "true",
+          "pk": 0
+        },
+        {
+          "name": "favorite",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "imagePath",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "ingredientsText",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "servings",
+          "type": "INTEGER",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "sourceNote",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "spicyLevel",
+          "type": "INTEGER",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "version",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    "RecipeIngredient": {
+      "columns": [
+        {
+          "name": "amountText",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "ingredientId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "ingredientNameSnapshot",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "isPrimary",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "optional",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "quantity",
+          "type": "REAL",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "recipeId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "sortOrder",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "0",
+          "pk": 0
+        },
+        {
+          "name": "unit",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        "ingredientId->Ingredient.id[SET NULL/CASCADE]",
+        "recipeId->Recipe.id[RESTRICT/CASCADE]"
+      ]
+    },
+    "RecipeMealRole": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "mealRole",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "recipeId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": ["recipeId->Recipe.id[RESTRICT/CASCADE]"]
+    },
+    "RecipeMealType": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "mealType",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "recipeId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": ["recipeId->Recipe.id[RESTRICT/CASCADE]"]
+    },
+    "RecipeStep": {
+      "columns": [
+        {
+          "name": "content",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "imagePath",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "recipeId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "stepNo",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "timerMinutes",
+          "type": "INTEGER",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": ["recipeId->Recipe.id[RESTRICT/CASCADE]"]
+    },
+    "RecipeTag": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "recipeId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "tagId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": ["recipeId->Recipe.id[RESTRICT/CASCADE]", "tagId->Tag.id[RESTRICT/CASCADE]"]
+    },
+    "RecipeTool": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "recipeId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "required",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "true",
+          "pk": 0
+        },
+        {
+          "name": "toolId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "toolNameSnapshot",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        "recipeId->Recipe.id[RESTRICT/CASCADE]",
+        "toolId->KitchenTool.id[SET NULL/CASCADE]"
+      ]
+    },
+    "ShoppingCheckinOperation": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "payloadHash",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "resultJson",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "shoppingListId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ShoppingList": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "deletedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "notnull": true,
+          "default": "'ACTIVE'",
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "version",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ShoppingListItem": {
+      "columns": [
+        {
+          "name": "amountText",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "category",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "completed",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "ingredientId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "ingredientNameSnapshot",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "quantity",
+          "type": "REAL",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "shoppingListId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "sortOrder",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "0",
+          "pk": 0
+        },
+        {
+          "name": "sourceId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "sourceType",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "unit",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        "ingredientId->Ingredient.id[SET NULL/CASCADE]",
+        "shoppingListId->ShoppingList.id[RESTRICT/CASCADE]"
+      ]
+    },
+    "Store": {
+      "columns": [
+        {
+          "name": "address",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "averageCost",
+          "type": "REAL",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "avoidDishes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "businessHours",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "contact",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "cuisine",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "deletedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "favorite",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "imagePath",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "notes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "rating",
+          "type": "REAL",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "recommendedDishes",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "storeType",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "supportsDineIn",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "supportsTakeout",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "tagsText",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "version",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "1",
+          "pk": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    "StoreMealType": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "mealType",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "storeId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": ["storeId->Store.id[RESTRICT/CASCADE]"]
+    },
+    "StoreMenuItem": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "desc",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "icon",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "isSignature",
+          "type": "BOOLEAN",
+          "notnull": true,
+          "default": "false",
+          "pk": 0
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "price",
+          "type": "INTEGER",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "sortOrder",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": "0",
+          "pk": 0
+        },
+        {
+          "name": "storeId",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": ["storeId->Store.id[RESTRICT/CASCADE]"]
+    },
+    "Tag": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "deletedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "type",
+          "type": "TEXT",
+          "notnull": true,
+          "default": "'GENERAL'",
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    "UploadAsset": {
+      "columns": [
+        {
+          "name": "createdAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": "CURRENT_TIMESTAMP",
+          "pk": 0
+        },
+        {
+          "name": "deletedAt",
+          "type": "DATETIME",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "filename",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "height",
+          "type": "INTEGER",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 1
+        },
+        {
+          "name": "mealRecordId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "mimeType",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "recipeId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "sha256",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "sizeBytes",
+          "type": "INTEGER",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "storagePath",
+          "type": "TEXT",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "storeId",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "thumbnailPath",
+          "type": "TEXT",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "updatedAt",
+          "type": "DATETIME",
+          "notnull": true,
+          "default": null,
+          "pk": 0
+        },
+        {
+          "name": "width",
+          "type": "INTEGER",
+          "notnull": false,
+          "default": null,
+          "pk": 0
+        }
+      ],
+      "foreignKeys": [
+        "mealRecordId->MealRecord.id[SET NULL/CASCADE]",
+        "recipeId->Recipe.id[SET NULL/CASCADE]",
+        "storeId->Store.id[SET NULL/CASCADE]"
+      ]
+    }
+  },
+  "indexes": [
+    {
+      "name": "Diner_active_idx",
+      "table": "Diner",
+      "unique": false,
+      "columns": ["active"]
+    },
+    {
+      "name": "Diner_name_idx",
+      "table": "Diner",
+      "unique": false,
+      "columns": ["name"]
+    },
+    {
+      "name": "Ingredient_category_idx",
+      "table": "Ingredient",
+      "unique": false,
+      "columns": ["category"]
+    },
+    {
+      "name": "Ingredient_deletedAt_idx",
+      "table": "Ingredient",
+      "unique": false,
+      "columns": ["deletedAt"]
+    },
+    {
+      "name": "Ingredient_expiryDate_idx",
+      "table": "Ingredient",
+      "unique": false,
+      "columns": ["expiryDate"]
+    },
+    {
+      "name": "Ingredient_name_idx",
+      "table": "Ingredient",
+      "unique": false,
+      "columns": ["name"]
+    },
+    {
+      "name": "InventoryBatch_consumePriority_idx",
+      "table": "InventoryBatch",
+      "unique": false,
+      "columns": ["consumePriority"]
+    },
+    {
+      "name": "InventoryBatch_expiryDate_idx",
+      "table": "InventoryBatch",
+      "unique": false,
+      "columns": ["expiryDate"]
+    },
+    {
+      "name": "InventoryBatch_ingredientId_deletedAt_idx",
+      "table": "InventoryBatch",
+      "unique": false,
+      "columns": ["ingredientId", "deletedAt"]
+    },
+    {
+      "name": "InventoryLog_ingredientId_createdAt_idx",
+      "table": "InventoryLog",
+      "unique": false,
+      "columns": ["ingredientId", "createdAt"]
+    },
+    {
+      "name": "InventoryLog_inventoryBatchId_createdAt_idx",
+      "table": "InventoryLog",
+      "unique": false,
+      "columns": ["inventoryBatchId", "createdAt"]
+    },
+    {
+      "name": "InventoryLog_relatedPlanId_idx",
+      "table": "InventoryLog",
+      "unique": false,
+      "columns": ["relatedPlanId"]
+    },
+    {
+      "name": "InventoryLog_relatedRecordId_idx",
+      "table": "InventoryLog",
+      "unique": false,
+      "columns": ["relatedRecordId"]
+    },
+    {
+      "name": "KitchenTool_deletedAt_idx",
+      "table": "KitchenTool",
+      "unique": false,
+      "columns": ["deletedAt"]
+    },
+    {
+      "name": "KitchenTool_name_idx",
+      "table": "KitchenTool",
+      "unique": false,
+      "columns": ["name"]
+    },
+    {
+      "name": "MealPlan_deletedAt_idx",
+      "table": "MealPlan",
+      "unique": false,
+      "columns": ["deletedAt"]
+    },
+    {
+      "name": "MealPlan_planDate_idx",
+      "table": "MealPlan",
+      "unique": false,
+      "columns": ["planDate"]
+    },
+    {
+      "name": "MealPlan_planDate_mealType_key",
+      "table": "MealPlan",
+      "unique": true,
+      "columns": ["planDate", "mealType"]
+    },
+    {
+      "name": "MealPlan_status_idx",
+      "table": "MealPlan",
+      "unique": false,
+      "columns": ["status"]
+    },
+    {
+      "name": "MealPlanDiner_dinerId_idx",
+      "table": "MealPlanDiner",
+      "unique": false,
+      "columns": ["dinerId"]
+    },
+    {
+      "name": "MealPlanDiner_mealPlanId_dinerId_key",
+      "table": "MealPlanDiner",
+      "unique": true,
+      "columns": ["mealPlanId", "dinerId"]
+    },
+    {
+      "name": "MealPlanItem_mealPlanId_sortOrder_idx",
+      "table": "MealPlanItem",
+      "unique": false,
+      "columns": ["mealPlanId", "sortOrder"]
+    },
+    {
+      "name": "MealPlanItem_recipeId_idx",
+      "table": "MealPlanItem",
+      "unique": false,
+      "columns": ["recipeId"]
+    },
+    {
+      "name": "MealPlanItem_storeId_idx",
+      "table": "MealPlanItem",
+      "unique": false,
+      "columns": ["storeId"]
+    },
+    {
+      "name": "MealRecord_deletedAt_idx",
+      "table": "MealRecord",
+      "unique": false,
+      "columns": ["deletedAt"]
+    },
+    {
+      "name": "MealRecord_mealType_recordDate_idx",
+      "table": "MealRecord",
+      "unique": false,
+      "columns": ["mealType", "recordDate"]
+    },
+    {
+      "name": "MealRecord_recordDate_idx",
+      "table": "MealRecord",
+      "unique": false,
+      "columns": ["recordDate"]
+    },
+    {
+      "name": "MealRecord_sourceMealPlanId_key",
+      "table": "MealRecord",
+      "unique": true,
+      "columns": ["sourceMealPlanId"]
+    },
+    {
+      "name": "MealRecord_status_recordDate_idx",
+      "table": "MealRecord",
+      "unique": false,
+      "columns": ["status", "recordDate"]
+    },
+    {
+      "name": "MealRecordDiner_dinerId_idx",
+      "table": "MealRecordDiner",
+      "unique": false,
+      "columns": ["dinerId"]
+    },
+    {
+      "name": "MealRecordDiner_mealRecordId_dinerId_key",
+      "table": "MealRecordDiner",
+      "unique": true,
+      "columns": ["mealRecordId", "dinerId"]
+    },
+    {
+      "name": "MealRecordItem_mealRecordId_sortOrder_idx",
+      "table": "MealRecordItem",
+      "unique": false,
+      "columns": ["mealRecordId", "sortOrder"]
+    },
+    {
+      "name": "MealRecordItem_recipeId_idx",
+      "table": "MealRecordItem",
+      "unique": false,
+      "columns": ["recipeId"]
+    },
+    {
+      "name": "MealRecordItem_storeId_idx",
+      "table": "MealRecordItem",
+      "unique": false,
+      "columns": ["storeId"]
+    },
+    {
+      "name": "Recipe_deletedAt_idx",
+      "table": "Recipe",
+      "unique": false,
+      "columns": ["deletedAt"]
+    },
+    {
+      "name": "Recipe_favorite_idx",
+      "table": "Recipe",
+      "unique": false,
+      "columns": ["favorite"]
+    },
+    {
+      "name": "Recipe_name_idx",
+      "table": "Recipe",
+      "unique": false,
+      "columns": ["name"]
+    },
+    {
+      "name": "RecipeIngredient_ingredientId_idx",
+      "table": "RecipeIngredient",
+      "unique": false,
+      "columns": ["ingredientId"]
+    },
+    {
+      "name": "RecipeIngredient_recipeId_sortOrder_idx",
+      "table": "RecipeIngredient",
+      "unique": false,
+      "columns": ["recipeId", "sortOrder"]
+    },
+    {
+      "name": "RecipeMealRole_mealRole_idx",
+      "table": "RecipeMealRole",
+      "unique": false,
+      "columns": ["mealRole"]
+    },
+    {
+      "name": "RecipeMealRole_recipeId_mealRole_key",
+      "table": "RecipeMealRole",
+      "unique": true,
+      "columns": ["recipeId", "mealRole"]
+    },
+    {
+      "name": "RecipeMealType_mealType_idx",
+      "table": "RecipeMealType",
+      "unique": false,
+      "columns": ["mealType"]
+    },
+    {
+      "name": "RecipeMealType_recipeId_mealType_key",
+      "table": "RecipeMealType",
+      "unique": true,
+      "columns": ["recipeId", "mealType"]
+    },
+    {
+      "name": "RecipeStep_recipeId_stepNo_idx",
+      "table": "RecipeStep",
+      "unique": false,
+      "columns": ["recipeId", "stepNo"]
+    },
+    {
+      "name": "RecipeStep_recipeId_stepNo_key",
+      "table": "RecipeStep",
+      "unique": true,
+      "columns": ["recipeId", "stepNo"]
+    },
+    {
+      "name": "RecipeTag_recipeId_tagId_key",
+      "table": "RecipeTag",
+      "unique": true,
+      "columns": ["recipeId", "tagId"]
+    },
+    {
+      "name": "RecipeTag_tagId_idx",
+      "table": "RecipeTag",
+      "unique": false,
+      "columns": ["tagId"]
+    },
+    {
+      "name": "RecipeTool_recipeId_idx",
+      "table": "RecipeTool",
+      "unique": false,
+      "columns": ["recipeId"]
+    },
+    {
+      "name": "RecipeTool_toolId_idx",
+      "table": "RecipeTool",
+      "unique": false,
+      "columns": ["toolId"]
+    },
+    {
+      "name": "ShoppingCheckinOperation_shoppingListId_createdAt_idx",
+      "table": "ShoppingCheckinOperation",
+      "unique": false,
+      "columns": ["shoppingListId", "createdAt"]
+    },
+    {
+      "name": "ShoppingList_deletedAt_idx",
+      "table": "ShoppingList",
+      "unique": false,
+      "columns": ["deletedAt"]
+    },
+    {
+      "name": "ShoppingList_status_idx",
+      "table": "ShoppingList",
+      "unique": false,
+      "columns": ["status"]
+    },
+    {
+      "name": "ShoppingListItem_ingredientId_idx",
+      "table": "ShoppingListItem",
+      "unique": false,
+      "columns": ["ingredientId"]
+    },
+    {
+      "name": "ShoppingListItem_shoppingListId_completed_sortOrder_idx",
+      "table": "ShoppingListItem",
+      "unique": false,
+      "columns": ["shoppingListId", "completed", "sortOrder"]
+    },
+    {
+      "name": "Store_deletedAt_idx",
+      "table": "Store",
+      "unique": false,
+      "columns": ["deletedAt"]
+    },
+    {
+      "name": "Store_favorite_idx",
+      "table": "Store",
+      "unique": false,
+      "columns": ["favorite"]
+    },
+    {
+      "name": "Store_name_idx",
+      "table": "Store",
+      "unique": false,
+      "columns": ["name"]
+    },
+    {
+      "name": "Store_storeType_idx",
+      "table": "Store",
+      "unique": false,
+      "columns": ["storeType"]
+    },
+    {
+      "name": "StoreMealType_mealType_idx",
+      "table": "StoreMealType",
+      "unique": false,
+      "columns": ["mealType"]
+    },
+    {
+      "name": "StoreMealType_storeId_mealType_key",
+      "table": "StoreMealType",
+      "unique": true,
+      "columns": ["storeId", "mealType"]
+    },
+    {
+      "name": "StoreMenuItem_storeId_sortOrder_idx",
+      "table": "StoreMenuItem",
+      "unique": false,
+      "columns": ["storeId", "sortOrder"]
+    },
+    {
+      "name": "Tag_deletedAt_idx",
+      "table": "Tag",
+      "unique": false,
+      "columns": ["deletedAt"]
+    },
+    {
+      "name": "Tag_name_type_key",
+      "table": "Tag",
+      "unique": true,
+      "columns": ["name", "type"]
+    },
+    {
+      "name": "UploadAsset_deletedAt_idx",
+      "table": "UploadAsset",
+      "unique": false,
+      "columns": ["deletedAt"]
+    },
+    {
+      "name": "UploadAsset_filename_key",
+      "table": "UploadAsset",
+      "unique": true,
+      "columns": ["filename"]
+    },
+    {
+      "name": "UploadAsset_mealRecordId_idx",
+      "table": "UploadAsset",
+      "unique": false,
+      "columns": ["mealRecordId"]
+    },
+    {
+      "name": "UploadAsset_recipeId_idx",
+      "table": "UploadAsset",
+      "unique": false,
+      "columns": ["recipeId"]
+    },
+    {
+      "name": "UploadAsset_sha256_idx",
+      "table": "UploadAsset",
+      "unique": false,
+      "columns": ["sha256"]
+    },
+    {
+      "name": "UploadAsset_storagePath_key",
+      "table": "UploadAsset",
+      "unique": true,
+      "columns": ["storagePath"]
+    },
+    {
+      "name": "UploadAsset_storeId_idx",
+      "table": "UploadAsset",
+      "unique": false,
+      "columns": ["storeId"]
+    }
+  ]
+}

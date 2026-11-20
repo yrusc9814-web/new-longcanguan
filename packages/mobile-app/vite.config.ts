@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite';
 
-// Google2 生产页面以静态 index.html + 原生脚本为唯一形态，
-// 这里只保留 Capacitor 需要的构建产物目录，不做任何框架接线。
+// Vite 打包端内启动入口，Google2 页面和原生适配器仍直接加载。
 export default defineConfig({
   base: '/',
   build: {

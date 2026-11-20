@@ -35,6 +35,7 @@ describe('离线资产迁移完整性', () => {
     const html = read('index.html');
     expect(html).toContain('<title>搭饭小馆</title>');
     expect(html).toContain('src="/assets/tailwind/tailwindcss-3.4.17.browser.min.js"');
+    expect(html).toContain('<script type="module" src="/src/local-api/bootstrap.ts"></script>');
     expect(html).toContain('src="/google2-adapter.js"');
     expect(html).toContain('id="appViewport"');
   });
@@ -44,7 +45,7 @@ describe('离线资产迁移完整性', () => {
     const references = [...html.matchAll(/(?:src|href)="(\/[^"]+)"/g)].map((match) => match[1]);
     expect(references.length).toBeGreaterThan(0);
     for (const reference of references) {
-      const relative = `public${reference}`;
+      const relative = reference.startsWith('/src/') ? reference.slice(1) : `public${reference}`;
       expect(existsSync(resolve(root, relative)), relative).toBe(true);
     }
   });
@@ -88,10 +89,17 @@ describe('Vite 构建产物', () => {
     }
   });
 
-  it('dist/index.html 与源 index.html 字节一致（内容无损）', () => {
-    const source = readFileSync(resolve(root, 'index.html'));
-    const built = readFileSync(resolve(dist, 'index.html'));
-    expect(built.equals(source)).toBe(true);
+  it('Vite 只重写端内启动入口，保留页面 DOM、样式与内联脚本', () => {
+    const source = read('index.html');
+    const built = read('dist/index.html');
+    const sourceEntry =
+      /^ *<script type="module" src="\/src\/local-api\/bootstrap\.ts"><\/script>\r?\n/m;
+    const builtEntry =
+      /^ *<script type="module"[^>]* src="(\/assets\/[^"/]+\.js)"><\/script>\r?\n/m;
+    const output = built.match(builtEntry)?.[1];
+    expect(output).toBeDefined();
+    expect(existsSync(resolve(dist, `.${output}`))).toBe(true);
+    expect(built.replace(builtEntry, '')).toBe(source.replace(sourceEntry, ''));
   });
 
   it('dist 内联脚本与源文件字节一致', () => {
