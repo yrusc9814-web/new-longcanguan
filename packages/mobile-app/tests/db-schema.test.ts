@@ -1,7 +1,19 @@
-import { RETAINED_MODELS, RETIRED_MODELS } from '@dafan/shared/contracts';
+import {
+  BUSINESS_INDEX_DDL as SHARED_BUSINESS_INDEX_DDL,
+  BUSINESS_TABLE_DDL as SHARED_BUSINESS_TABLE_DDL,
+  RETAINED_MODELS,
+  RETIRED_MODELS,
+} from '@dafan/shared/contracts';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { BUSINESS_TABLES, LOCAL_TABLE_DDL, LOCAL_TABLES, SCHEMA_DDL } from '../src/db/schema';
+import {
+  BUSINESS_INDEX_DDL,
+  BUSINESS_TABLE_DDL,
+  BUSINESS_TABLES,
+  LOCAL_TABLE_DDL,
+  LOCAL_TABLES,
+  SCHEMA_DDL,
+} from '../src/db/schema';
 import { createNodeSqliteDriver, createTempDatabasePath } from './helpers/node-sqlite-driver';
 import { openDatabase, type DatabaseHandle } from '../src/db/database';
 
@@ -161,5 +173,33 @@ describe('离线库 schema 终态', () => {
     );
     expect(config).toEqual([{ id: 1, pinEnabled: 0 }]);
     expect(state).toEqual([{ id: 1, epoch: 0 }]);
+  });
+});
+
+describe('端云同源 schema 契约（@dafan/shared/contracts）', () => {
+  it('端侧业务 DDL 直接引用 shared 常量，未保留本地副本', () => {
+    expect(BUSINESS_TABLE_DDL).toBe(SHARED_BUSINESS_TABLE_DDL);
+    expect(BUSINESS_INDEX_DDL).toBe(SHARED_BUSINESS_INDEX_DDL);
+    expect(BUSINESS_TABLE_DDL).toHaveLength(27);
+    expect(BUSINESS_INDEX_DDL).toHaveLength(70);
+  });
+
+  it('27 张业务表名与 RETAINED_MODELS 逐字一致，且 DDL 覆盖全部模型', () => {
+    const names = BUSINESS_TABLE_DDL.map((ddl) => /^CREATE TABLE "([^"]+)"/.exec(ddl)?.[1]);
+    expect([...names].sort()).toEqual([...RETAINED_MODELS].sort());
+    expect(new Set(names).size).toBe(27);
+  });
+
+  it('落库后的 sqlite_master 原文与 shared DDL 逐字相同（仅抹平 IF NOT EXISTS）', async () => {
+    const normalize = (sql: string) => sql.replace(/ IF NOT EXISTS/i, '');
+    const rows = await handle.query<{ name: string; sql: string }>(
+      "SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'",
+    );
+    const stored = new Map(rows.map((row) => [row.name, normalize(row.sql)]));
+    for (const ddl of [...BUSINESS_TABLE_DDL, ...BUSINESS_INDEX_DDL]) {
+      const name = /"([^"]+)"/.exec(ddl)?.[1];
+      expect(name, ddl.slice(0, 40)).toBeTruthy();
+      expect(stored.get(name!), name).toBe(normalize(ddl));
+    }
   });
 });

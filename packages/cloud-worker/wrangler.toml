@@ -2,7 +2,7 @@ name = "dafan-cloud-worker"
 main = "src/index.ts"
 compatibility_date = "2026-11-01"
 
-# HouseholdHub Durable Object（占位，不含业务同步）
+# 家庭权威库使用 SQLite Durable Object。
 [[durable_objects.bindings]]
 name = "HOUSEHOLD_HUB"
 class_name = "HouseholdHub"
