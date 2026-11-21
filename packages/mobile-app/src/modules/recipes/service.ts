@@ -647,6 +647,7 @@ export async function deleteRecipe(
       entityId: id,
       kind: 'delete',
       baseVersion: version,
+      payload: { deletedAt: now },
     });
     return { id, deleted: true };
   });

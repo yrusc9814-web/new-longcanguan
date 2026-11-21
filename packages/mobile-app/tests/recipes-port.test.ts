@@ -452,10 +452,17 @@ describe('PUT/DELETE/favorite', () => {
     expect(await database.query('SELECT "id" FROM "Tag"')).toHaveLength(1);
 
     const rows = await outbox(database);
+    // 严格 FIFO：创建时的 Tag upsert 与复活后的 Tag upsert 都保留。
     expect(rows.filter((row) => row.entity === 'Tag')).toEqual([
       expect.objectContaining({
         entityId: tagRow!.id,
         kind: 'upsert',
+        baseVersion: null,
+      }),
+      expect.objectContaining({
+        entityId: tagRow!.id,
+        kind: 'upsert',
+        baseVersion: null,
         payloadJson: expect.stringContaining('"deletedAt":null'),
       }),
     ]);

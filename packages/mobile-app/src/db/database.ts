@@ -34,7 +34,13 @@ interface OutboxInputBase {
 }
 
 export type OutboxOperationInput =
-  | (OutboxInputBase & { readonly kind: 'upsert' | 'delete' })
+  | (OutboxInputBase & { readonly kind: 'upsert' })
+  | (OutboxInputBase & {
+      readonly kind: 'delete';
+      readonly baseVersion: number;
+      /** 删除唯一证据：与本地软删写入的 `deletedAt` 必须是同一字符串。 */
+      readonly payload: { readonly deletedAt: string };
+    })
   | (OutboxInputBase & {
       readonly kind: 'command';
       readonly entity: 'Ingredient';
@@ -44,7 +50,6 @@ export type OutboxOperationInput =
     });
 
 interface OutboxRow {
-  seq: number;
   opId: string;
   entity: string;
   entityId: string;
@@ -53,12 +58,48 @@ interface OutboxRow {
   baseVersion: number | null;
   payloadJson: string | null;
   epoch: number;
-  state: 'pending' | 'inflight' | 'dead';
 }
 
 async function hashPayload(payloadJson: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payloadJson));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/** 对象键排序后的 JSON：键顺序不影响同一操作的重试判定，数组顺序保持敏感。 */
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value as Record<string, unknown>)
+        .sort()
+        .map((key) => [key, canonicalJson((value as Record<string, unknown>)[key])]),
+    );
+  }
+  return value;
+}
+
+function samePayload(left: string | null, right: string | null): boolean {
+  if (left === right) return true;
+  if (left === null || right === null) return false;
+  try {
+    return (
+      JSON.stringify(canonicalJson(JSON.parse(left))) ===
+      JSON.stringify(canonicalJson(JSON.parse(right)))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** 旧 v2 行的 delete 载荷可能带 id/version 等冗余列；重试判定只看 deletedAt。 */
+function deletedAtOf(payloadJson: string | null): string | null {
+  if (payloadJson === null) return null;
+  try {
+    const value = (JSON.parse(payloadJson) as { deletedAt?: unknown }).deletedAt;
+    return typeof value === 'string' ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface VersionedUpdateSpec {
@@ -231,25 +272,43 @@ class WriteTransactionImpl implements WriteTransaction {
     if (!SYNC_ENTITIES.has(operation.entity)) {
       throw new DatabaseError('INVALID_STATE', `不可同步的实体：${operation.entity}`, 422);
     }
+    // delete 的唯一持久化证据是 deletedAt：其余列已由 entity/entityId/baseVersion 表达。
+    // 在落库边界统一收紧，任何调用方传入的多余字段都不进发件箱。
+    let payload = operation.payload as Record<string, unknown> | null | undefined;
+    if (operation.kind === 'delete') {
+      const deletedAt = payload?.deletedAt;
+      if (typeof deletedAt !== 'string' || deletedAt.length === 0) {
+        throw new DatabaseError('INVALID_STATE', 'delete 操作必须携带 deletedAt', 422);
+      }
+      payload = { deletedAt };
+    }
     const [state] = await this.query<{ epoch: number }>(
       `SELECT "epoch" FROM "${SYNC_STATE_TABLE}" WHERE "id" = 1`,
     );
     const epoch = state?.epoch ?? 0;
-    const payloadJson = operation.payload == null ? null : JSON.stringify(operation.payload);
+    const payloadJson = payload == null ? null : JSON.stringify(payload);
     const commandType = operation.kind === 'command' ? operation.commandType : null;
     const [existing] = await this.query<OutboxRow>(
-      `SELECT rowid AS seq, * FROM "${SYNC_OUTBOX_TABLE}" WHERE "opId" = ?`,
+      `SELECT "opId", "entity", "entityId", "kind", "commandType", "baseVersion", "payloadJson", "epoch"
+       FROM "${SYNC_OUTBOX_TABLE}" WHERE "opId" = ?`,
       [operation.opId],
     );
     if (existing) {
+      // 同一 opId 的重试必须逐字段等价：entity/entityId/kind/commandType/baseVersion/payload/epoch。
+      // delete 载荷只比较 deletedAt：旧 v2 行可能保留 id/version 冗余列，语义相同即视为同一操作。
+      const payloadMatches =
+        operation.kind === 'delete'
+          ? existing.kind === 'delete' &&
+            deletedAtOf(existing.payloadJson) === deletedAtOf(payloadJson)
+          : samePayload(existing.payloadJson, payloadJson);
       if (
         existing.entity !== operation.entity ||
         existing.entityId !== operation.entityId ||
         existing.epoch !== epoch ||
         existing.kind !== operation.kind ||
         existing.commandType !== commandType ||
-        existing.payloadJson !== payloadJson ||
-        (operation.kind === 'command' && existing.baseVersion !== operation.baseVersion)
+        existing.baseVersion !== operation.baseVersion ||
+        !payloadMatches
       ) {
         throw new DatabaseError('INVALID_STATE', '发件箱操作 ID 已用于不同写入', 409);
       }
@@ -258,25 +317,7 @@ class WriteTransactionImpl implements WriteTransaction {
 
     const timestamp = this.now().toISOString();
     const payloadHash = payloadJson === null ? null : await hashPayload(payloadJson);
-    if (operation.kind !== 'command') {
-      const [latest] = await this.query<OutboxRow>(
-        `SELECT rowid AS seq, * FROM "${SYNC_OUTBOX_TABLE}"
-         WHERE "entity" = ? AND "entityId" = ? AND "epoch" = ? ORDER BY rowid DESC LIMIT 1`,
-        [operation.entity, operation.entityId, epoch],
-      );
-      // A command must replay after its inputs. A delete must replay after a queued create.
-      const deleteAfterCreate = operation.kind === 'delete' && latest?.baseVersion === null;
-      if (latest?.state === 'pending' && latest.kind !== 'command' && !deleteAfterCreate) {
-        await this.run(
-          `UPDATE "${SYNC_OUTBOX_TABLE}" SET "opId" = ?, "kind" = ?, "payloadJson" = ?,
-            "payloadHash" = ?, "attemptCount" = 0, "lastError" = NULL, "nextAttemptAt" = NULL,
-            "updatedAt" = ? WHERE rowid = ? AND "state" = 'pending' AND "kind" IN ('upsert', 'delete')`,
-          [operation.opId, operation.kind, payloadJson, payloadHash, timestamp, latest.seq],
-        );
-        return;
-      }
-    }
-
+    // 严格 rowid FIFO：每次写入都追加一条，不做同实体合并，保证重放顺序与本地操作顺序一致。
     await this.run(
       `INSERT INTO "${SYNC_OUTBOX_TABLE}"
         ("id", "opId", "entity", "entityId", "kind", "commandType", "baseVersion", "payloadJson", "payloadHash", "epoch", "createdAt", "updatedAt")

@@ -231,7 +231,7 @@ export async function deleteTool(
       kind: 'delete',
       // delete 的 baseVersion 是"我基于的云端版本"，即删除前的 version。
       baseVersion: version,
-      payload: { id, version, deletedAt: timestamp },
+      payload: { deletedAt: timestamp },
     });
     return { id, deleted: true };
   });

@@ -219,8 +219,11 @@ describe('Diner 本地接口', () => {
     });
 
     const ops = await outbox(harness.db);
-    // 主代理发件箱会把同一实体的连续 pending 写合并成一条，这里只断言最终意图。
-    expect(ops.at(-1)).toMatchObject({ entity: 'Diner', entityId: id, kind: 'upsert' });
+    // 严格 FIFO：创建与更新各留一条 pending upsert，最后一条是更新后的完整快照。
+    expect(ops).toEqual([
+      expect.objectContaining({ entity: 'Diner', entityId: id, kind: 'upsert', baseVersion: null }),
+      expect.objectContaining({ entity: 'Diner', entityId: id, kind: 'upsert', baseVersion: 1 }),
+    ]);
     expect(JSON.parse(ops.at(-1)!.payloadJson as string)).toMatchObject({
       tabooText: '葱',
       allergyText: null,
@@ -483,9 +486,7 @@ describe('KitchenTool 本地接口', () => {
       kind: 'delete',
       baseVersion: 1,
     });
-    expect(JSON.parse(ops.at(-1)!.payloadJson as string)).toMatchObject({
-      id,
-      version: 1,
+    expect(JSON.parse(ops.at(-1)!.payloadJson as string)).toEqual({
       deletedAt: NOW.toISOString(),
     });
   });

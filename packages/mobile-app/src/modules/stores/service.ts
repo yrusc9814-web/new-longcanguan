@@ -938,7 +938,7 @@ export async function deleteStore(
       entityId: id,
       kind: 'delete',
       baseVersion: version,
-      payload: { id, version, deletedAt: timestamp },
+      payload: { deletedAt: timestamp },
     });
     return { id, deletedAt: timestamp, version: version + 1 };
   });

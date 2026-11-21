@@ -8,6 +8,7 @@
  * - 食材汇总数量只统计 quantity > 0 的活批次并换算到基础单位。
  */
 import type { InventoryChangeType, QuantityUnit } from '@dafan/shared/types';
+import type { IngredientDeductionPayload } from '@dafan/shared/sync';
 
 import type { WriteTransaction } from '../../db/database.js';
 import { convertQuantity } from '../units.js';
@@ -116,16 +117,24 @@ export async function loadBatches(
   );
 }
 
+/** 批次与库存日志的落库主键对：调用方据此把已提交的 ID 固定进同步载荷。 */
+export interface BatchRef {
+  readonly batchId: string;
+  readonly logId: string;
+}
+
 /** 无活动批次且汇总数量 > 0 时，在事务内真实补建等效批次并写 ADJUST 日志。 */
 export async function persistImplicitBatch(
   tx: WriteTransaction,
   ingredient: BatchFacts,
   existingBatches: ReadonlyArray<{ quantity: number }>,
   now: Date,
-): Promise<{ batchId: string; quantity: number; unit: QuantityUnit } | null> {
+  /** 主键生成器；重放时注入命令载荷中的固定 ID。 */
+  nextId: () => string = newBatchId,
+): Promise<{ batchId: string; logId: string; quantity: number; unit: QuantityUnit } | null> {
   if (hasActiveStock(existingBatches) || !(ingredient.quantity > 0)) return null;
   const quantity = roundQuantity(ingredient.quantity);
-  const batchId = newBatchId();
+  const batchId = nextId();
   const timestamp = now.toISOString();
   await tx.run(
     `INSERT INTO "InventoryBatch"
@@ -145,19 +154,23 @@ export async function persistImplicitBatch(
       timestamp,
     ],
   );
-  await insertLog(tx, {
-    ingredientId: ingredient.ingredientId,
-    ingredientNameSnapshot: ingredient.name,
-    inventoryBatchId: batchId,
-    beforeQuantity: 0,
-    changeQuantity: quantity,
-    afterQuantity: quantity,
-    unit: ingredient.unit,
-    changeType: 'ADJUST',
-    notes: '历史存量自动补建等效批次',
-    now,
-  });
-  return { batchId, quantity, unit: ingredient.unit };
+  const logId = await insertLog(
+    tx,
+    {
+      ingredientId: ingredient.ingredientId,
+      ingredientNameSnapshot: ingredient.name,
+      inventoryBatchId: batchId,
+      beforeQuantity: 0,
+      changeQuantity: quantity,
+      afterQuantity: quantity,
+      unit: ingredient.unit,
+      changeType: 'ADJUST',
+      notes: '历史存量自动补建等效批次',
+      now,
+    },
+    nextId,
+  );
+  return { batchId, logId, quantity, unit: ingredient.unit };
 }
 
 export interface LogInput {
@@ -176,8 +189,12 @@ export interface LogInput {
 }
 
 /** 写一条 InventoryLog（与批次更新同事务）；返回日志 id。 */
-export async function insertLog(tx: WriteTransaction, input: LogInput): Promise<string> {
-  const id = newBatchId();
+export async function insertLog(
+  tx: WriteTransaction,
+  input: LogInput,
+  nextId: () => string = newBatchId,
+): Promise<string> {
+  const id = nextId();
   const timestamp = input.now.toISOString();
   await tx.run(
     `INSERT INTO "InventoryLog"
@@ -232,8 +249,10 @@ export async function replaceBatches(
       notes?: string | null;
     }>;
     now: Date;
+    /** 主键生成器；重放时注入命令载荷中的固定 ID。 */
+    nextId?: () => string;
   },
-): Promise<{ quantity: number; opened: boolean }> {
+): Promise<{ quantity: number; opened: boolean; created: BatchRef[] }> {
   const { ingredientId, ingredientName, baseUnit, batches, now } = params;
   const timestamp = now.toISOString();
   await tx.run(
@@ -243,8 +262,10 @@ export async function replaceBatches(
   );
   let quantity = 0;
   let opened = false;
+  const created: BatchRef[] = [];
+  const nextId = params.nextId ?? newBatchId;
   for (const batch of batches) {
-    const batchId = newBatchId();
+    const batchId = nextId();
     await tx.run(
       `INSERT INTO "InventoryBatch"
         ("id", "ingredientId", "quantity", "unit", "purchaseDate", "expiryDate", "location", "opened", "consumePriority", "notes", "version", "deletedAt", "createdAt", "updatedAt")
@@ -264,22 +285,27 @@ export async function replaceBatches(
         timestamp,
       ],
     );
-    await insertLog(tx, {
-      ingredientId,
-      ingredientNameSnapshot: ingredientName,
-      inventoryBatchId: batchId,
-      beforeQuantity: 0,
-      changeQuantity: batch.quantity,
-      afterQuantity: batch.quantity,
-      unit: batch.unit,
-      changeType: 'ADJUST',
-      notes: '食材编辑替换批次',
-      now,
-    });
+    const logId = await insertLog(
+      tx,
+      {
+        ingredientId,
+        ingredientNameSnapshot: ingredientName,
+        inventoryBatchId: batchId,
+        beforeQuantity: 0,
+        changeQuantity: batch.quantity,
+        afterQuantity: batch.quantity,
+        unit: batch.unit,
+        changeType: 'ADJUST',
+        notes: '食材编辑替换批次',
+        now,
+      },
+      nextId,
+    );
+    created.push({ batchId, logId });
     quantity += convertQuantity(batch.quantity, batch.unit, baseUnit) ?? 0;
     if (batch.quantity > 0 && batch.opened) opened = true;
   }
-  return { quantity: roundQuantity(quantity), opened };
+  return { quantity: roundQuantity(quantity), opened, created };
 }
 
 /**
@@ -305,8 +331,10 @@ export async function synchronizeBatches(
       opened: boolean;
     };
     now: Date;
+    /** 主键生成器；重放时注入命令载荷中的固定 ID。 */
+    nextId?: () => string;
   },
-): Promise<void> {
+): Promise<{ addedBatch?: BatchRef; deductions?: IngredientDeductionPayload[] }> {
   const {
     ingredientId,
     ingredientName,
@@ -317,14 +345,22 @@ export async function synchronizeBatches(
     fallbackMeta,
     now,
   } = params;
+  const nextId = params.nextId ?? newBatchId;
   const batches = await loadBatches(tx, ingredientId);
   const active = batches.filter((batch) => batch.quantity > 0);
   const total = summarizeQuantity(active, baseUnit);
   const delta = roundQuantity(targetQuantity - total);
   const timestamp = now.toISOString();
 
+  let addedBatch: BatchRef | undefined;
+  const deductions: IngredientDeductionPayload[] = [];
+  const result = () => ({
+    ...(addedBatch ? { addedBatch } : {}),
+    ...(deductions.length ? { deductions } : {}),
+  });
+
   if (delta > QUANTITY_EPSILON) {
-    const batchId = newBatchId();
+    const batchId = nextId();
     const purchaseDate =
       meta.purchaseDate === undefined ? fallbackMeta.purchaseDate : meta.purchaseDate;
     const expiryDate = meta.expiryDate === undefined ? fallbackMeta.expiryDate : meta.expiryDate;
@@ -347,18 +383,23 @@ export async function synchronizeBatches(
         timestamp,
       ],
     );
-    await insertLog(tx, {
-      ingredientId,
-      ingredientNameSnapshot: ingredientName,
-      inventoryBatchId: batchId,
-      beforeQuantity: 0,
-      changeQuantity: delta,
-      afterQuantity: delta,
-      unit: baseUnit,
-      changeType: 'ADJUST',
-      notes: '食材编辑同步库存',
-      now,
-    });
+    const logId = await insertLog(
+      tx,
+      {
+        ingredientId,
+        ingredientNameSnapshot: ingredientName,
+        inventoryBatchId: batchId,
+        beforeQuantity: 0,
+        changeQuantity: delta,
+        afterQuantity: delta,
+        unit: baseUnit,
+        changeType: 'ADJUST',
+        notes: '食材编辑同步库存',
+        now,
+      },
+      nextId,
+    );
+    addedBatch = { batchId, logId };
   } else if (delta < -QUANTITY_EPSILON) {
     let remaining = roundQuantity(-delta);
     for (const batch of active) {
@@ -386,17 +427,29 @@ export async function synchronizeBatches(
           },
         });
       }
-      await insertLog(tx, {
-        ingredientId,
-        ingredientNameSnapshot: ingredientName,
-        inventoryBatchId: batch.id,
+      const logId = await insertLog(
+        tx,
+        {
+          ingredientId,
+          ingredientNameSnapshot: ingredientName,
+          inventoryBatchId: batch.id,
+          beforeQuantity: batch.quantity,
+          changeQuantity: -takeInBatchUnit,
+          afterQuantity: after,
+          unit: batch.unit,
+          changeType: 'MANUAL_DEDUCT',
+          notes: '食材编辑同步库存',
+          now,
+        },
+        nextId,
+      );
+      deductions.push({
+        batchId: batch.id,
+        logId,
         beforeQuantity: batch.quantity,
         changeQuantity: -takeInBatchUnit,
         afterQuantity: after,
         unit: batch.unit,
-        changeType: 'MANUAL_DEDUCT',
-        notes: '食材编辑同步库存',
-        now,
       });
       remaining = roundQuantity(remaining - take);
     }
@@ -405,7 +458,7 @@ export async function synchronizeBatches(
     }
   }
 
-  if (!metaTouched) return;
+  if (!metaTouched) return result();
   // 食材级字段适用于所有活批次；省略字段保留，显式 null 同步清空。
   const assignments: string[] = [];
   const values: Array<string | number | null> = [];
@@ -425,7 +478,7 @@ export async function synchronizeBatches(
     assignments.push('"opened" = ?');
     values.push(meta.opened ? 1 : 0);
   }
-  if (!assignments.length) return;
+  if (!assignments.length) return result();
   assignments.push('"updatedAt" = ?');
   values.push(timestamp);
   await tx.run(
@@ -433,6 +486,7 @@ export async function synchronizeBatches(
      WHERE "ingredientId" = ? AND "deletedAt" IS NULL AND "quantity" > 0`,
     [...values, ingredientId],
   );
+  return result();
 }
 
 let idCounter = 0;

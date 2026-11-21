@@ -186,6 +186,26 @@ describe('POST /api/v1/ingredients', () => {
       version: 1,
     });
     expect((payload.batches as unknown[]).length).toBe(2);
+    // 初始 PURCHASE 完整落库事实：id / 库存外键 / 前后数量 / 时间
+    const inventoryLogs = payload.inventoryLogs as Array<Record<string, unknown>>;
+    expect(inventoryLogs).toHaveLength(2);
+    const storedLogs = await db.query<Record<string, unknown>>(
+      'SELECT * FROM "InventoryLog" WHERE "ingredientId" = ? ORDER BY rowid',
+      [ingredientId],
+    );
+    for (const [index, log] of storedLogs.entries()) {
+      expect(inventoryLogs[index]).toMatchObject({
+        id: log.id,
+        ingredientId: log.ingredientId,
+        inventoryBatchId: log.inventoryBatchId,
+        beforeQuantity: 0,
+        changeType: 'PURCHASE',
+        createdAt: NOW.toISOString(),
+        updatedAt: NOW.toISOString(),
+      });
+      expect(inventoryLogs[index]!.changeQuantity).toBe(log.changeQuantity);
+      expect(inventoryLogs[index]!.afterQuantity).toBe(log.afterQuantity);
+    }
   });
 
   it('缺少名称 / 单位不可换算 / 负数量 → 400 且不写库、不入队', async () => {
@@ -394,6 +414,17 @@ describe('PUT /api/v1/ingredients/:id', () => {
     });
     const payload = JSON.parse(rows[1]!.payloadJson as string) as Record<string, unknown>;
     expect(payload).toMatchObject({ id: ingredient.id, baseVersion: 1 });
+    expect(payload.executedAt).toBe(NOW.toISOString());
+    // 数量差额补建：批次与日志 ID 均取自已落库行
+    const addedBatch = payload.addedBatch as { batchId: string; logId: string };
+    expect(addedBatch.batchId).toBeTruthy();
+    expect(addedBatch.logId).toBeTruthy();
+    const [addedLog] = await db.query<{ id: string; inventoryBatchId: string }>(
+      'SELECT "id","inventoryBatchId" FROM "InventoryLog" WHERE "notes" = ?',
+      ['食材编辑同步库存'],
+    );
+    expect(addedBatch.logId).toBe(addedLog!.id);
+    expect(addedBatch.batchId).toBe(addedLog!.inventoryBatchId);
     expect(payload.request).toMatchObject({
       name: '编辑加量面粉',
       unit: 'GRAM',
@@ -587,6 +618,24 @@ describe('PUT /api/v1/ingredients/:id', () => {
     );
     expect(retired!.deletedAt).toBeTruthy();
     expect(await db.query('PRAGMA foreign_key_check')).toEqual([]);
+
+    // 命令载荷按请求顺序固定新批次/日志 ID
+    const rows = await outbox(db);
+    const payload = JSON.parse(rows[1]!.payloadJson as string) as {
+      executedAt: string;
+      replacedBatches: Array<{ batchId: string; logId: string }>;
+    };
+    expect(payload.executedAt).toBe(NOW.toISOString());
+    expect(payload.replacedBatches.map((ref) => ref.batchId).sort()).toEqual(
+      activeBatches.map((batch) => batch.id).sort(),
+    );
+    const replacementLogs = await db.query<{ id: string }>(
+      'SELECT "id" FROM "InventoryLog" WHERE "ingredientId" = ? AND "notes" = ? ORDER BY rowid',
+      [String(ingredient.id), '食材编辑替换批次'],
+    );
+    expect(payload.replacedBatches.map((ref) => ref.logId)).toEqual(
+      replacementLogs.map((log) => log.id),
+    );
   });
 
   it('历史存量无活批次：编辑前自动补建等效批次并写 ADJUST', async () => {
@@ -672,7 +721,8 @@ describe('DELETE /api/v1/ingredients/:id', () => {
     const last = rows.at(-1)!;
     expect(last).toMatchObject({ entity: 'Ingredient', entityId: id, kind: 'delete' });
     expect(last.baseVersion).toBe(1);
-    expect(JSON.parse(last.payloadJson as string)).toMatchObject({ id, version: 1 });
+    const lastPayload = JSON.parse(last.payloadJson as string) as Record<string, unknown>;
+    expect(lastPayload).toEqual({ deletedAt: NOW.toISOString() });
     // 不允许在 delete 之后还残留会复活该实体的 pending upsert
     expect(rows.every((row) => row.kind !== 'upsert' || rows.indexOf(row) < rows.length - 1)).toBe(
       true,
@@ -767,6 +817,31 @@ describe('POST /api/v1/ingredients/:id/consume', () => {
       baseVersion: 1,
       request: { mode: 'QUANTITY', quantity: 450, unit: 'GRAM', ingredientVersion: 1, notes: null },
     });
+    expect(payload.executedAt).toBe(NOW.toISOString());
+    // deductions 必须按实际扣减顺序映射明确 batchId 与已落库日志 ID
+    const deductions = payload.deductions as Array<{
+      batchId: string;
+      logId: string;
+      beforeQuantity: number;
+      changeQuantity: number;
+      afterQuantity: number;
+    }>;
+    const deducted = data.allocations as Array<Record<string, unknown>>;
+    expect(
+      deductions.map((item) => [item.batchId, item.beforeQuantity, item.changeQuantity]),
+    ).toEqual(
+      deducted.map((item) => [
+        item.batchId as string,
+        item.beforeQuantity as number,
+        item.changeQuantity as number,
+      ]),
+    );
+    const logRows = await db.query<{ id: string }>(
+      'SELECT "id" FROM "InventoryLog" WHERE "ingredientId" = ? AND "changeType" = ? ORDER BY rowid',
+      [id, 'MANUAL_DEDUCT'],
+    );
+    expect(deductions.map((item) => item.logId)).toEqual(logRows.map((row) => row.id));
+    expect(payload.inventoryLogIds).toEqual(logRows.map((row) => row.id));
   });
 
   it('QUANTITY：可用量不足 → 409 且无任何写入/入队（不部分扣减）', async () => {

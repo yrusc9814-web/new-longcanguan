@@ -286,11 +286,11 @@ describe('店铺域本地 API', () => {
       { name: '新店' },
     ]);
 
-    // 未同步新建的多次更新会合并成一条 pending upsert：baseVersion 保持 null（本地尚未上云）。
+    // 严格 rowid FIFO：新建与三次连续更新各留一条，最后一条携带最新 baseVersion 与完整聚合。
     const upserts = (await outbox(db)).filter((row) => row.kind === 'upsert');
-    expect(upserts).toHaveLength(1);
-    expect(upserts[0]).toMatchObject({ entityId: store.id, baseVersion: null });
-    const payload = JSON.parse(upserts[0].payloadJson as string) as Record<string, unknown>;
+    expect(upserts.map((row) => row.baseVersion)).toEqual([null, 1, 2, 3]);
+    expect(upserts[0]).toMatchObject({ entityId: store.id });
+    const payload = JSON.parse(upserts.at(-1)!.payloadJson as string) as Record<string, unknown>;
     expect(payload).toMatchObject({ name: '新店', mealTypes: [], menuItems: [] });
   });
 

@@ -29,6 +29,8 @@ export type SyncOperation =
   | (SyncOperationBase & {
       readonly kind: 'delete';
       readonly baseVersion: number;
+      /** 删除唯一证据；服务端与端侧都以该值判定删除（与本地软删时间一致）。 */
+      readonly deletedAt: string;
     })
   | (SyncOperationBase & {
       readonly kind: 'command';

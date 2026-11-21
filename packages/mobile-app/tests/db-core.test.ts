@@ -390,7 +390,7 @@ describe('发件箱与业务写入同事务', () => {
     ]);
   });
 
-  it('同一实体的后续写入覆盖前一条待同步操作（避免乱序重放）', async () => {
+  it('同一实体的连续写入按 rowid 追加，不再覆盖前一条待同步操作', async () => {
     const handle = await freshMemoryDatabase();
     await handle.withWriteTransaction(async (tx) => {
       await tx.enqueue({
@@ -399,6 +399,7 @@ describe('发件箱与业务写入同事务', () => {
         entityId: 'r1',
         kind: 'upsert',
         baseVersion: 1,
+        payload: { name: '旧名' },
       });
     });
     await handle.withWriteTransaction(async (tx) => {
@@ -408,12 +409,16 @@ describe('发件箱与业务写入同事务', () => {
         entityId: 'r1',
         kind: 'delete',
         baseVersion: 1,
+        payload: { deletedAt: NOW },
       });
     });
-    const rows = await handle.query<{ opId: string; kind: string }>(
-      'SELECT "opId","kind" FROM "sync_outbox"',
-    );
-    expect(rows).toEqual([{ opId: 'op-2', kind: 'delete' }]);
+    await expect(
+      handle.query('SELECT "opId", "kind", "baseVersion" FROM "sync_outbox" ORDER BY rowid'),
+    ).resolves.toEqual([
+      { opId: 'op-1', kind: 'upsert', baseVersion: 1 },
+      { opId: 'op-2', kind: 'delete', baseVersion: 1 },
+    ]);
+    await handle.close();
   });
 
   it('保留未同步的新建及后续删除，使离线操作能够依序重放', async () => {
@@ -421,18 +426,24 @@ describe('发件箱与业务写入同事务', () => {
     await handle.withWriteTransaction(async (tx) => {
       const entity = { entity: 'KitchenTool', entityId: 't1' } as const;
       await tx.enqueue({ ...entity, opId: 'create', kind: 'upsert', baseVersion: null });
-      await tx.enqueue({ ...entity, opId: 'delete', kind: 'delete', baseVersion: 1 });
+      await tx.enqueue({
+        ...entity,
+        opId: 'delete',
+        kind: 'delete',
+        baseVersion: 1,
+        payload: { deletedAt: NOW },
+      });
     });
     await expect(
-      handle.query('SELECT "opId", "baseVersion" FROM "sync_outbox" ORDER BY rowid'),
+      handle.query('SELECT "opId", "baseVersion", "payloadJson" FROM "sync_outbox" ORDER BY rowid'),
     ).resolves.toEqual([
-      { opId: 'create', baseVersion: null },
-      { opId: 'delete', baseVersion: 1 },
+      { opId: 'create', baseVersion: null, payloadJson: null },
+      { opId: 'delete', baseVersion: 1, payloadJson: JSON.stringify({ deletedAt: NOW }) },
     ]);
     await handle.close();
   });
 
-  it('修改只合并同一实体最近的 pending 写，保留 inflight 和中间命令的顺序', async () => {
+  it('upsert/delete/command 一律按 rowid 顺序追加，保留 inflight 位置', async () => {
     const handle = await freshMemoryDatabase();
     await handle.withWriteTransaction(async (tx) => {
       const queue = (opId: string, baseVersion: number, quantity: number) =>
@@ -464,28 +475,185 @@ describe('发件箱与业务写入同事务', () => {
       await queue('after-command-latest', 6, 10);
     });
     const rows = await handle.query(
-      `SELECT "opId", "state", "baseVersion", "payloadHash", "attemptCount" FROM "sync_outbox" ORDER BY rowid`,
+      `SELECT "opId", "state", "baseVersion", "attemptCount" FROM "sync_outbox" ORDER BY rowid`,
     );
-    const hash = expect.stringMatching(/^[0-9a-f]{64}$/);
     expect(rows).toEqual([
-      { opId: 'inflight', state: 'inflight', baseVersion: 1, payloadHash: hash, attemptCount: 1 },
-      {
-        opId: 'before-command',
-        state: 'pending',
-        baseVersion: 2,
-        payloadHash: hash,
-        attemptCount: 0,
-      },
-      { opId: 'consume-1', state: 'pending', baseVersion: 3, payloadHash: hash, attemptCount: 0 },
-      { opId: 'consume-2', state: 'pending', baseVersion: 4, payloadHash: hash, attemptCount: 0 },
-      {
-        opId: 'after-command-latest',
-        state: 'pending',
-        baseVersion: 5,
-        payloadHash: hash,
-        attemptCount: 0,
-      },
+      { opId: 'inflight', state: 'inflight', baseVersion: 1, attemptCount: 1 },
+      { opId: 'before-command', state: 'pending', baseVersion: 2, attemptCount: 0 },
+      { opId: 'consume-1', state: 'pending', baseVersion: 3, attemptCount: 0 },
+      { opId: 'consume-2', state: 'pending', baseVersion: 4, attemptCount: 0 },
+      { opId: 'after-command', state: 'pending', baseVersion: 5, attemptCount: 0 },
+      { opId: 'after-command-latest', state: 'pending', baseVersion: 6, attemptCount: 0 },
     ]);
+    await handle.close();
+  });
+
+  it('同一 opId 的等价重试幂等，payload 键序不同也算同一操作', async () => {
+    const handle = await freshMemoryDatabase();
+    await handle.withWriteTransaction(async (tx) => {
+      await tx.enqueue({
+        opId: 'op-1',
+        entity: 'Recipe',
+        entityId: 'r1',
+        kind: 'upsert',
+        baseVersion: 1,
+        payload: { name: '番茄炒蛋', notes: null },
+      });
+      await tx.enqueue({
+        opId: 'op-1',
+        entity: 'Recipe',
+        entityId: 'r1',
+        kind: 'upsert',
+        baseVersion: 1,
+        payload: { notes: null, name: '番茄炒蛋' },
+      });
+    });
+    await expect(handle.query('SELECT "opId","payloadJson" FROM "sync_outbox"')).resolves.toEqual([
+      { opId: 'op-1', payloadJson: JSON.stringify({ name: '番茄炒蛋', notes: null }) },
+    ]);
+    await handle.close();
+  });
+
+  it('同一 opId 携带不同 baseVersion 视为不同写入并拒绝', async () => {
+    const handle = await freshMemoryDatabase();
+    await handle.withWriteTransaction((tx) =>
+      tx.enqueue({
+        opId: 'same',
+        entity: 'Recipe',
+        entityId: 'r1',
+        kind: 'upsert',
+        baseVersion: 1,
+        payload: { name: 'a' },
+      }),
+    );
+    await expect(
+      handle.withWriteTransaction((tx) =>
+        tx.enqueue({
+          opId: 'same',
+          entity: 'Recipe',
+          entityId: 'r1',
+          kind: 'upsert',
+          baseVersion: 2,
+          payload: { name: 'a' },
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE', statusCode: 409 });
+    await expect(
+      handle.withWriteTransaction((tx) =>
+        tx.enqueue({
+          opId: 'same',
+          entity: 'Recipe',
+          entityId: 'r1',
+          kind: 'delete',
+          baseVersion: 1,
+          payload: { deletedAt: NOW },
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE', statusCode: 409 });
+    await handle.close();
+  });
+
+  it('老 v2 delete 行可读：带 id/version 的旧载荷重试同一 opId 仍幂等', async () => {
+    const handle = await freshMemoryDatabase();
+    const legacyPayload = JSON.stringify({ id: 's1', version: 1, deletedAt: NOW });
+    await handle.withWriteTransaction(async (tx) => {
+      await tx.run(
+        `INSERT INTO "sync_outbox"
+          ("id","opId","entity","entityId","kind","commandType","baseVersion","payloadJson","payloadHash","epoch","state","createdAt","updatedAt")
+         VALUES ('legacy','legacy','Store','s1','delete',NULL,1,?,NULL,0,'pending',?,?)`,
+        [legacyPayload, NOW, NOW],
+      );
+    });
+    await expect(
+      handle.withWriteTransaction((tx) =>
+        tx.enqueue({
+          opId: 'legacy',
+          entity: 'Store',
+          entityId: 's1',
+          kind: 'delete',
+          baseVersion: 1,
+          payload: { deletedAt: NOW },
+        }),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(handle.query('SELECT "opId","payloadJson" FROM "sync_outbox"')).resolves.toEqual([
+      { opId: 'legacy', payloadJson: legacyPayload },
+    ]);
+    await handle.close();
+  });
+
+  it('老 v2 delete 行（payload 为空）仍可读，新操作追加其后且不伪造历史载荷', async () => {
+    const handle = await freshMemoryDatabase();
+    await handle.withWriteTransaction(async (tx) => {
+      await tx.run(
+        `INSERT INTO "sync_outbox"
+          ("id","opId","entity","entityId","kind","commandType","baseVersion","payloadJson","payloadHash","epoch","state","createdAt","updatedAt")
+         VALUES ('legacy-null','legacy-null','Recipe','r1','delete',NULL,1,NULL,NULL,0,'pending',?,?)`,
+        [NOW, NOW],
+      );
+    });
+    await expect(
+      handle.query(
+        'SELECT "opId","kind","baseVersion","payloadJson" FROM "sync_outbox" ORDER BY rowid',
+      ),
+    ).resolves.toEqual([
+      { opId: 'legacy-null', kind: 'delete', baseVersion: 1, payloadJson: null },
+    ]);
+
+    await handle.withWriteTransaction((tx) =>
+      tx.enqueue({
+        opId: 'next',
+        entity: 'Recipe',
+        entityId: 'r1',
+        kind: 'delete',
+        baseVersion: 1,
+        payload: { deletedAt: NOW },
+      }),
+    );
+    await expect(
+      handle.query('SELECT "opId","payloadJson" FROM "sync_outbox" ORDER BY rowid'),
+    ).resolves.toEqual([
+      { opId: 'legacy-null', payloadJson: null },
+      { opId: 'next', payloadJson: JSON.stringify({ deletedAt: NOW }) },
+    ]);
+    await handle.close();
+  });
+
+  it('delete 载荷只持久化 deletedAt，多余字段在落库边界被剥离', async () => {
+    const handle = await freshMemoryDatabase();
+    await handle.withWriteTransaction((tx) =>
+      tx.enqueue({
+        opId: 'trim',
+        entity: 'Store',
+        entityId: 's1',
+        kind: 'delete',
+        baseVersion: 1,
+        payload: { id: 's1', version: 1, deletedAt: NOW } as never,
+      }),
+    );
+    await expect(handle.query('SELECT "payloadJson" FROM "sync_outbox"')).resolves.toEqual([
+      { payloadJson: JSON.stringify({ deletedAt: NOW }) },
+    ]);
+    await handle.close();
+  });
+
+  it('delete 必须携带 deletedAt，缺失或空串直接拒绝且不写库', async () => {
+    const handle = await freshMemoryDatabase();
+    for (const payload of [null, {}, { deletedAt: '' }, { deletedAt: 1 }]) {
+      await expect(
+        handle.withWriteTransaction((tx) =>
+          tx.enqueue({
+            opId: `del-${JSON.stringify(payload)}`,
+            entity: 'Store',
+            entityId: 's1',
+            kind: 'delete',
+            baseVersion: 1,
+            payload: payload as never,
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    }
+    expect(await count(handle, 'SELECT COUNT(*) AS c FROM "sync_outbox"')).toBe(0);
     await handle.close();
   });
 
