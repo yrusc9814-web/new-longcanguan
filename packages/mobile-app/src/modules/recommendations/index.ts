@@ -114,7 +114,8 @@ async function recipeCandidates(
        AND (? = 0 OR r."favorite" = 1)
        AND (? IS NULL OR EXISTS (SELECT 1 FROM "RecipeMealType" mt WHERE mt."recipeId" = r."id" AND mt."mealType" = ?))
        AND NOT EXISTS (SELECT 1 FROM "RecipeTool" rt LEFT JOIN "KitchenTool" t ON t."id" = rt."toolId"
-        WHERE rt."recipeId" = r."id" AND rt."required" = 1 AND (t."id" IS NULL OR t."deletedAt" IS NOT NULL OR t."quantity" <= 0))`,
+        WHERE rt."recipeId" = r."id" AND rt."required" = 1 AND (t."id" IS NULL OR t."deletedAt" IS NOT NULL OR t."quantity" <= 0
+          OR upper(COALESCE(t."status", '')) IN ('BROKEN', 'MISSING', 'UNAVAILABLE')))`,
       [input.favoriteOnly, input.mealType ?? null, input.mealType ?? null],
     ),
     db.query<IngredientRow>(`SELECT i.* FROM "RecipeIngredient" i JOIN "Recipe" r ON r."id" = i."recipeId"
@@ -236,6 +237,7 @@ async function recommend(db: DatabaseClient, input: Input, now: Date) {
           'SELECT "defaultRepeatDays" FROM "Settings" WHERE "id" = 1',
         )
       : [];
+  const repeatDays = input.repeatDays ?? setting?.defaultRepeatDays ?? 0;
   const [diners, recent] = await Promise.all([
     input.dinerIds.length
       ? db.query<DinerRestrictionTexts>(
@@ -243,12 +245,15 @@ async function recommend(db: DatabaseClient, input: Input, now: Date) {
           [JSON.stringify(input.dinerIds)],
         )
       : [],
-    db.query<{ recipeId: string | null; storeId: string | null }>(
-      `SELECT DISTINCT i."recipeId", i."storeId"
+    // repeatDays <= 0 表示关闭「近期已吃」扣分：窗口为空，绝不给 -40。
+    repeatDays <= 0
+      ? []
+      : db.query<{ recipeId: string | null; storeId: string | null }>(
+          `SELECT DISTINCT i."recipeId", i."storeId"
       FROM "MealRecordItem" i JOIN "MealRecord" m ON m."id" = i."mealRecordId"
       WHERE m."deletedAt" IS NULL AND m."status" = 'CONFIRMED' AND m."recordDate" >= ?`,
-      [localDate(now, -(input.repeatDays ?? setting?.defaultRepeatDays ?? 0))],
-    ),
+          [localDate(now, -repeatDays)],
+        ),
   ]);
   const words = forbiddenWordsOf(diners);
   const [recipes, stores] = await Promise.all([

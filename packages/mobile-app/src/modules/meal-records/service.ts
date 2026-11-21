@@ -388,6 +388,16 @@ export function cleanedRecordTime(value: unknown): string | null | undefined {
 }
 
 /** 照片路径只接受 `/uploads/` 相对路径，禁 data URL / 目录逃逸 / 重复。 */
+function assertUploadPath(cleaned: string, label: string): string {
+  if (/^data:/i.test(cleaned) || /;base64,/i.test(cleaned))
+    throw validationError(`${label}不能使用 data URL / base64`);
+  if (cleaned.includes('\0') || cleaned.includes('\\') || cleaned.includes('..'))
+    throw validationError(`${label}不能包含非法字符`);
+  if (!UPLOAD_PATH_PATTERN.test(cleaned))
+    throw validationError(`${label}必须是 /uploads/ 下的图片路径`);
+  return cleaned;
+}
+
 export function normalizePhotos(value: unknown): string[] | null | undefined {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -399,22 +409,24 @@ export function normalizePhotos(value: unknown): string[] | null | undefined {
     const cleaned = entry.trim();
     if (!cleaned) throw validationError(`第 ${index + 1} 张照片路径不能为空`);
     if (cleaned.length > 300) throw validationError(`第 ${index + 1} 张照片路径过长`);
-    if (/^data:/i.test(cleaned) || /;base64,/i.test(cleaned))
-      throw validationError(`第 ${index + 1} 张照片不能使用 data URL / base64`);
-    if (cleaned.includes('\0') || cleaned.includes('\\') || cleaned.includes('..'))
-      throw validationError(`第 ${index + 1} 张照片路径不能包含非法字符`);
-    if (!UPLOAD_PATH_PATTERN.test(cleaned))
-      throw validationError(`第 ${index + 1} 张照片必须是 /uploads/ 下的图片路径`);
-    return cleaned;
+    return assertUploadPath(cleaned, `第 ${index + 1} 张照片`);
   });
   if (new Set(photos).size !== photos.length) throw validationError('多图照片不能重复');
   return photos;
+}
+
+/** 单图 `imagePath`：与 photos 同一路径形状约束（伪造引用在落库边界再校验登记）。 */
+export function normalizeImagePath(value: unknown): string | null | undefined {
+  const cleaned = cleanedText(value, 'imagePath', 300);
+  if (!cleaned) return cleaned;
+  return assertUploadPath(cleaned, 'imagePath');
 }
 
 /** 照片必须是本机已登记且未删除的 UploadAsset，否则 400（禁止伪造引用）。 */
 async function assertUploadedPhotos(
   transaction: WriteTransaction,
   photos: readonly string[],
+  label = '照片',
 ): Promise<void> {
   const names = photos.map((path) => path.slice('/uploads/'.length));
   const rows = await transaction.query<{
@@ -440,7 +452,7 @@ async function assertUploadedPhotos(
     (path) => !known.has(path) && !known.has(path.slice('/uploads/'.length)),
   );
   if (missing.length)
-    throw validationError(`照片不是本机已上传的图片：${missing.join('、')}，请重新上传`);
+    throw validationError(`${label}不是本机已上传的图片：${missing.join('、')}，请重新上传`);
 }
 
 function validateItems(items: readonly MealRecordItemInput[]): void {
@@ -604,7 +616,7 @@ export function parseRecordBody(
     mealType: body.mealType,
     sourceType: body.sourceType,
     status: (body.status as RecordStatus | undefined) ?? 'CONFIRMED',
-    imagePath: cleanedText(body.imagePath, 'imagePath', 300) ?? null,
+    imagePath: normalizeImagePath(body.imagePath) ?? null,
     photos: normalizePhotos(body.photos) ?? null,
     rating: nullableInteger(body.rating, '评分', 0, 5) ?? null,
     satiety: nullableInteger(body.satiety, '饱腹度', 0) ?? null,
@@ -680,7 +692,7 @@ export function parseRecordPatch(body: Record<string, unknown>): MealRecordPatch
     if (!isRecordStatus(body.status)) throw validationError('status 必须是 DRAFT 或 CONFIRMED');
     patch.status = body.status;
   }
-  if ('imagePath' in body) patch.imagePath = cleanedText(body.imagePath, 'imagePath', 300) ?? null;
+  if ('imagePath' in body) patch.imagePath = normalizeImagePath(body.imagePath) ?? null;
   if ('photos' in body) patch.photos = normalizePhotos(body.photos) ?? null;
   if ('rating' in body) {
     const rating = nullableInteger(body.rating, '评分', 0, 5) ?? null;
@@ -747,6 +759,8 @@ export async function insertRecord(
   const photos = input.photos ?? null;
   if (photos && photos.length) await assertUploadedPhotos(transaction, photos);
   const imagePath = photos && photos.length ? photos[0] : (input.imagePath ?? null);
+  if (!(photos && photos.length) && imagePath)
+    await assertUploadedPhotos(transaction, [imagePath], '单图 imagePath');
   const status: RecordStatus = input.status;
   await transaction.run(
     `INSERT INTO "MealRecord"
@@ -784,7 +798,7 @@ export async function insertRecord(
   if (!dto) throw httpError(500, 'INTERNAL_ERROR', '饮食记录创建后读取失败');
   if (options.enqueueUpsert !== false) {
     await transaction.enqueue({
-      opId: newId(),
+      opId: newLocalId(),
       entity: 'MealRecord',
       entityId: recordId,
       kind: 'upsert',
@@ -961,6 +975,13 @@ export async function updateRecord(
       throw new VersionConflictError('MealRecord', id, version, current.version);
     if (current.status === 'CONFIRMED' && patch.status === 'DRAFT')
       throw httpError(409, 'CONFLICT', '已确认记录不能退回草稿');
+    // 计划完成生成的自动草稿：菜品与就餐人是计划事实的投影，改动会让撤销/复活无法证明未被编辑。
+    if (
+      current.status === 'DRAFT' &&
+      current.sourceMealPlanId !== null &&
+      (patch.items !== undefined || patch.dinerIds !== undefined)
+    )
+      throw httpError(409, 'CONFLICT', '自动草稿的菜品与就餐人由排餐计划决定，请修改计划本身');
 
     const timestamp = now.toISOString();
     const photos = patch.photos;
@@ -976,6 +997,8 @@ export async function updateRecord(
           ? photos[0]
           : null;
     if (photos && photos.length) await assertUploadedPhotos(tx, photos);
+    else if (photos === undefined && patch.imagePath)
+      await assertUploadedPhotos(tx, [patch.imagePath], '单图 imagePath');
     const values: SqlValue[] = [
       patch.recordDate ?? current.recordDate,
       patch.recordTime === undefined ? current.recordTime : patch.recordTime,
@@ -1026,7 +1049,7 @@ export async function updateRecord(
     const dto = await loadRecordDto(tx, id);
     if (!dto) throw notFound();
     await tx.enqueue({
-      opId: context.newId(),
+      opId: newLocalId(),
       entity: 'MealRecord',
       entityId: id,
       kind: 'upsert',
@@ -1128,7 +1151,7 @@ export async function deleteRecord(
     }
 
     await enqueueMealCommand(tx, {
-      opId: context.newId(),
+      opId: newLocalId(),
       entity: 'MealRecord',
       entityId: id,
       commandType: 'RECORD_DELETE',

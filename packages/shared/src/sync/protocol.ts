@@ -24,9 +24,7 @@ export type SyncCommandTarget = {
   [Command in SyncCommandType]: {
     readonly commandType: Command;
     readonly entity: (typeof SYNC_COMMAND_ENTITIES)[Command];
-    readonly baseVersion: Command extends 'RECIPE_COOK_CHECKIN' | 'SHOPPING_CHECKIN'
-      ? number | null
-      : number;
+    readonly baseVersion: Command extends 'RECIPE_COOK_CHECKIN' ? number | null : number;
   };
 }[SyncCommandType];
 

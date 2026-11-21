@@ -259,7 +259,7 @@ export async function cookCheckinRecipe(
     );
 
     await enqueueMealCommand(transaction, {
-      opId: newId(),
+      opId: newLocalId(),
       entity: 'MealRecord',
       entityId: created.id,
       commandType: 'RECIPE_COOK_CHECKIN',
@@ -300,7 +300,9 @@ export async function cookCheckinRecipe(
           satiety: input.satiety,
           cost: input.cost,
           sourceType: input.sourceType,
-          dinerIds: [...input.dinerIds].sort(),
+          // 与落库顺序严格一致（`insertRecord` 按此顺序插入 MealRecordDiner），
+          // 云端按 `dinerRowIds[i] <-> dinerIds[i]` 逐行对齐，禁止在这里再排序。
+          dinerIds: [...input.dinerIds],
         },
       },
     });

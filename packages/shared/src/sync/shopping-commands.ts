@@ -6,7 +6,7 @@
  */
 import type { QuantityUnit, ShoppingListStatus, ShoppingSourceType } from '../types/index.js';
 
-/** 单家庭默认活跃购物清单的固定 ID：冷启动自动补建时使用，重放方直接复用。 */
+/** 端云预置的默认活跃购物清单 ID，初始版本为 1。 */
 export const SHOPPING_DEFAULT_LIST_ID = 'shopping_list_active_default';
 
 export const SHOPPING_DEFAULT_LIST_NAME = '购物清单';
@@ -74,7 +74,12 @@ export interface ShoppingCheckinInventoryFactPayload {
   readonly ingredientUnit: QuantityUnit;
   /** 入库后食材汇总数量（基础单位）。 */
   readonly ingredientQuantity: number;
+  /** 入库前的食材版本；新建食材为 null（版本链起点）。 */
+  readonly ingredientBaseVersion: number | null;
+  /** 入库后食材版本；首次新建保持 1。 */
   readonly ingredientVersion: number;
+  /** 入库后食材的标准化分类（7 大分类之一）。 */
+  readonly ingredientCategory: string | null;
   readonly batchId: string;
   readonly batchQuantity: number;
   readonly batchUnit: QuantityUnit;

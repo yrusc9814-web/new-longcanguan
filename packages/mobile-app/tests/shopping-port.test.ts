@@ -110,6 +110,7 @@ interface SeedList {
   readonly version?: number;
   readonly name?: string;
   readonly status?: string;
+  readonly deletedAt?: string | null;
 }
 
 /** 直接落库的预置清单（不写发件箱），用于重放场景的同一初始状态。 */
@@ -117,8 +118,16 @@ async function seedList(db: DatabaseHandle, list: SeedList, items: readonly Seed
   await db.withWriteTransaction(async (tx) => {
     await tx.run(
       `INSERT INTO "ShoppingList" ("id","name","status","notes","version","deletedAt","createdAt","updatedAt")
-       VALUES (?, ?, ?, NULL, ?, NULL, ?, ?)`,
-      [list.id, list.name ?? '购物清单', list.status ?? 'ACTIVE', list.version ?? 1, T0, T0],
+       VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
+      [
+        list.id,
+        list.name ?? '购物清单',
+        list.status ?? 'ACTIVE',
+        list.version ?? 1,
+        list.deletedAt ?? null,
+        T0,
+        T0,
+      ],
     );
     for (const [index, item] of items.entries()) {
       await tx.run(
@@ -183,7 +192,7 @@ describe('默认活跃清单', () => {
     harness = await createHarness();
   });
 
-  it('空库首次读取补建固定 ID 空清单，且零发件箱', async () => {
+  it('空库首次读取补建固定 ID 空清单 v1，且零发件箱（端云预置同形）', async () => {
     const { db, router } = harness;
     const first = await call<Array<Record<string, unknown>>>(
       router,
@@ -204,6 +213,71 @@ describe('默认活跃清单', () => {
     await call(router, 'GET', '/api/v1/shopping-lists?status=ACTIVE');
     expect(await count(db, 'ShoppingList')).toBe(1);
     expect(await outbox(db)).toHaveLength(0);
+  });
+
+  it('默认清单软删且无其他活跃清单时恢复为空活跃单，保留版本链且零发件箱', async () => {
+    const { db, router } = harness;
+    await seedList(db, { id: DEFAULT_SHOPPING_LIST_ID, version: 6, deletedAt: T0 }, [
+      { id: 'item-stale-1', name: '旧番茄', quantity: 500, unit: 'GRAM' },
+      { id: 'item-stale-2', name: '旧鸡蛋', quantity: 6, unit: 'PIECE' },
+    ]);
+
+    const restored = await call<Array<Record<string, unknown>>>(
+      router,
+      'GET',
+      '/api/v1/shopping-lists?status=ACTIVE',
+    );
+    expect(restored.status).toBe(200);
+    expect(restored.body.data).toHaveLength(1);
+    expect(restored.body.data![0]).toMatchObject({
+      id: DEFAULT_SHOPPING_LIST_ID,
+      status: 'ACTIVE',
+      version: 6,
+      items: [],
+    });
+    // 恢复不是用户变更：不发件箱、不重置版本。
+    expect(await outbox(db)).toHaveLength(0);
+    expect(await count(db, 'ShoppingListItem')).toBe(0);
+    const [row] = await db.query<{ version: number; deletedAt: string | null }>(
+      'SELECT "version","deletedAt" FROM "ShoppingList" WHERE "id" = ?',
+      [DEFAULT_SHOPPING_LIST_ID],
+    );
+    expect(row).toEqual({ version: 6, deletedAt: null });
+
+    // 恢复后的实际写入沿用既有版本链：baseVersion = expectedVersion。
+    const added = await call<{ version: number }>(
+      router,
+      'POST',
+      `/api/v1/shopping-lists/${DEFAULT_SHOPPING_LIST_ID}/items`,
+      { version: 6, ingredientName: '番茄', quantity: 500, unit: 'GRAM' },
+    );
+    expect(added.body.data!.version).toBe(7);
+    const rows = await outbox(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'upsert', baseVersion: 6 });
+    expect((JSON.parse(rows[0]!.payloadJson as string) as ShoppingListUpsertPayload).version).toBe(
+      7,
+    );
+  });
+
+  it('清空发件箱后再写入，仍按真实期望版本入队', async () => {
+    const { db, router } = harness;
+    await seedList(db, { id: 'list-synced', version: 3 });
+    await db.withWriteTransaction(async (tx) => {
+      await tx.run(`DELETE FROM "${SYNC_OUTBOX_TABLE}"`);
+    });
+
+    const added = await call<{ version: number }>(
+      router,
+      'POST',
+      '/api/v1/shopping-lists/list-synced/items',
+      { version: 3, ingredientName: '土豆', quantity: 2, unit: 'KILOGRAM' },
+    );
+    expect(added.status).toBe(200);
+    expect(added.body.data!.version).toBe(4);
+    const rows = await outbox(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ entityId: 'list-synced', baseVersion: 3 });
   });
 
   it('现存真实清单优先复用，不补建默认清单也不写发件箱', async () => {
@@ -264,12 +338,12 @@ describe('条目 CRUD 与清单版本', () => {
 
     const rows = await outbox(db);
     expect(rows).toHaveLength(1);
-    // 该清单从未同步过：本次即为云端新建，baseVersion 必须为 null。
+    // 既有清单的实际写入一律以本次期望版本为 baseVersion。
     expect(rows[0]).toMatchObject({
       entity: 'ShoppingList',
       entityId: 'list-crud',
       kind: 'upsert',
-      baseVersion: null,
+      baseVersion: 1,
     });
     const payload = JSON.parse(rows[0]!.payloadJson as string) as ShoppingListUpsertPayload;
     expect(payload.version).toBe(2);
@@ -691,8 +765,6 @@ describe('check-in（结构化校验 + 幂等入库）', () => {
       if (fact.createdIngredient) replayIds.push(fact.ingredientId);
       replayIds.push(fact.batchId, fact.logId);
     }
-    // 最后一条 ID 用于命令自身的 opId。
-    replayIds.push('op-id-sink');
     let cursor = 0;
     const fixedIds = () => {
       const id = replayIds[cursor];
@@ -714,6 +786,8 @@ describe('check-in（结构化校验 + 幂等入库）', () => {
       itemIds: ['item-replay-a', 'item-replay-b'],
     });
 
+    // 业务实体主键全部复用固定序列；发件箱 opId 独立随机，不消耗该序列。
+    expect(cursor).toBe(replayIds.length);
     expect(await snapshot(replayed.db, FACT_TABLES)).toEqual(
       await snapshot(primary.db, FACT_TABLES),
     );
@@ -722,12 +796,12 @@ describe('check-in（结构化校验 + 幂等入库）', () => {
     expect(replayedOutbox[0]!.payloadJson).toBe(command.payloadJson);
     expect(replayedOutbox[0]!.payloadHash).toBe(command.payloadHash);
     expect(replayedOutbox[0]!.payloadHash).toBe(sha256(replayedOutbox[0]!.payloadJson as string));
-    expect(cursor).toBe(replayIds.length);
+    expect(replayedOutbox[0]!.opId).not.toBe(command.opId);
   });
 });
 
 describe('购物清单服务直调（不经路由）', () => {
-  it('createShoppingList 返回 201 DTO 语义并写入单条 upsert', async () => {
+  it('createShoppingList 返回 201 DTO 语义并写入单条 upsert（baseVersion null / version 1）', async () => {
     const db = await openDatabase({
       driver: createNodeSqliteDriver({ path: ':memory:' }),
       now: () => NOW,
@@ -735,7 +809,17 @@ describe('购物清单服务直调（不经路由）', () => {
     const ctx: ShoppingServiceContext = { database: db, now: () => NOW };
     const created = await createShoppingList(ctx, { name: '周末采购' });
     expect(created).toMatchObject({ name: '周末采购', status: 'ACTIVE', version: 1, items: [] });
-    expect(await outbox(db)).toHaveLength(1);
+    const createdRows = await outbox(db);
+    expect(createdRows).toHaveLength(1);
+    expect(createdRows[0]).toMatchObject({
+      entity: 'ShoppingList',
+      entityId: created.id,
+      kind: 'upsert',
+      baseVersion: null,
+    });
+    expect(
+      (JSON.parse(createdRows[0]!.payloadJson as string) as ShoppingListUpsertPayload).version,
+    ).toBe(1);
 
     const list = await listShoppingLists(ctx, { status: 'ACTIVE' });
     expect(list.map((row) => row.id)).toContain(created.id);
@@ -762,6 +846,18 @@ describe('购物清单服务直调（不经路由）', () => {
       ingredientName: '豆腐',
       quantity: 1,
     });
+
+    // 后续每条实际写入都以提交前的期望版本为 baseVersion。
+    const versions = (await outbox(db)).map((row) => [
+      row.baseVersion,
+      JSON.parse(row.payloadJson as string).version,
+    ]);
+    expect(versions).toEqual([
+      [null, 1],
+      [1, 2],
+      [2, 3],
+      [3, 4],
+    ]);
   });
 });
 
@@ -807,7 +903,9 @@ describe('check-in 与既有库存数据', () => {
       createdIngredient: false,
       ingredientId: 'ing-tomato',
       ingredientQuantity: 800,
+      ingredientBaseVersion: 1,
       ingredientVersion: 2,
+      ingredientCategory: '蔬菜',
       batchQuantity: 500,
     });
     const command = (await outbox(db))[0]!;
@@ -858,5 +956,189 @@ describe('check-in 与既有库存数据', () => {
     const payload = JSON.parse(command.payloadJson as string) as ShoppingCheckinCommandPayload;
     expect(payload.inventory[0]).toMatchObject({ kind: 'LEGACY_HEAL', afterQuantity: 2 });
     expect(payload.inventory[1]).toMatchObject({ kind: 'INGREDIENT_IMPORT', batchQuantity: 1 });
+  });
+
+  it('同单两条同名新食材在循环内合并为同一食材：首条 v1、第二条 base 1 -> v2', async () => {
+    const db = await openDatabase({
+      driver: createNodeSqliteDriver({ path: ':memory:' }),
+      now: () => NOW,
+    });
+    await seedList(db, { id: 'list-merge' }, [
+      { id: 'item-merge-a', name: '番茄', quantity: 400, unit: 'GRAM', sortOrder: 0 },
+      { id: 'item-merge-b', name: ' 番茄 ', quantity: 1, unit: 'KILOGRAM', sortOrder: 1 },
+    ]);
+    const ctx: ShoppingServiceContext = { database: db, now: () => NOW };
+    const result = await checkInShoppingItems(ctx, 'list-merge', {
+      version: 1,
+      operationId: 'op-merge',
+      itemIds: ['item-merge-a', 'item-merge-b'],
+    });
+    expect(await count(db, 'Ingredient')).toBe(1);
+    const [ingredient] = await db.query<{
+      id: string;
+      quantity: number;
+      version: number;
+      category: string;
+    }>('SELECT "id","quantity","version","category" FROM "Ingredient"');
+    expect(ingredient).toMatchObject({ quantity: 1400, version: 2, category: '蔬菜' });
+    expect(
+      result.imported.inventory.map((fact) => [
+        fact.kind,
+        fact.createdIngredient,
+        fact.ingredientId,
+        fact.ingredientBaseVersion,
+        fact.ingredientVersion,
+        fact.ingredientQuantity,
+        fact.ingredientCategory,
+      ]),
+    ).toEqual([
+      ['INGREDIENT_IMPORT', true, ingredient!.id, null, 1, 400, '蔬菜'],
+      ['INGREDIENT_IMPORT', false, ingredient!.id, 1, 2, 1400, '蔬菜'],
+    ]);
+    expect(await count(db, 'InventoryBatch')).toBe(2);
+  });
+
+  it('单条新建食材入库：ingredientBaseVersion 为 null，版本保持 1，facts 带分类', async () => {
+    const db = await openDatabase({
+      driver: createNodeSqliteDriver({ path: ':memory:' }),
+      now: () => NOW,
+    });
+    await seedList(db, { id: 'list-new-single' }, [
+      { id: 'item-new-single', name: '五花肉', quantity: 300, unit: 'GRAM' },
+    ]);
+    const ctx: ShoppingServiceContext = { database: db, now: () => NOW };
+    const result = await checkInShoppingItems(ctx, 'list-new-single', {
+      version: 1,
+      operationId: 'op-new-single',
+      itemIds: ['item-new-single'],
+    });
+    const [fact] = result.imported.inventory;
+    expect(fact).toMatchObject({
+      kind: 'INGREDIENT_IMPORT',
+      createdIngredient: true,
+      ingredientBaseVersion: null,
+      ingredientVersion: 1,
+      ingredientQuantity: 300,
+      ingredientCategory: '肉禽',
+    });
+    const [ingredient] = await db.query<{ version: number; category: string }>(
+      'SELECT "version","category" FROM "Ingredient" WHERE "id" = ?',
+      [fact!.ingredientId],
+    );
+    expect(ingredient).toEqual({ version: 1, category: '肉禽' });
+    const command = (await outbox(db))[0]!;
+    const payload = JSON.parse(command.payloadJson as string) as ShoppingCheckinCommandPayload;
+    expect(payload.inventory[0]).toMatchObject({
+      ingredientBaseVersion: null,
+      ingredientVersion: 1,
+      ingredientCategory: '肉禽',
+    });
+    expect(payload.baseVersion).toBe(1);
+  });
+
+  it('既有食材换单位：空库存时对齐新单位并刷新内存态后再汇总库存', async () => {
+    const db = await openDatabase({
+      driver: createNodeSqliteDriver({ path: ':memory:' }),
+      now: () => NOW,
+    });
+    await seedList(db, { id: 'list-unit' }, [
+      { id: 'item-unit', name: '牛奶', quantity: 2, unit: 'LITER' },
+      { id: 'item-unit-next', name: '牛奶', quantity: 500, unit: 'MILLILITER' },
+    ]);
+    await db.withWriteTransaction(async (tx) => {
+      await tx.run(
+        `INSERT INTO "Ingredient" ("id","name","imagePath","category","quantity","unit","purchaseDate","expiryDate","location","minStock","maxStock","opened","notes","version","deletedAt","createdAt","updatedAt")
+         VALUES ('ing-milk','牛奶',NULL,'蛋奶豆制',0,'PIECE',NULL,NULL,NULL,NULL,NULL,0,NULL,1,NULL,?,?)`,
+        [T0, T0],
+      );
+    });
+    const ctx: ShoppingServiceContext = { database: db, now: () => NOW };
+    const result = await checkInShoppingItems(ctx, 'list-unit', {
+      version: 1,
+      operationId: 'op-unit',
+      itemIds: ['item-unit', 'item-unit-next'],
+    });
+    const [ingredient] = await db.query<{ quantity: number; unit: string; version: number }>(
+      'SELECT "quantity","unit","version" FROM "Ingredient" WHERE "id" = ?',
+      ['ing-milk'],
+    );
+    // 由 2L + 500ml 汇总到新基础单位 LITER = 2.5。
+    expect(ingredient).toMatchObject({ quantity: 2.5, unit: 'LITER', version: 3 });
+    expect(
+      result.imported.inventory.map((fact) => [
+        fact.ingredientUnit,
+        fact.ingredientBaseVersion,
+        fact.ingredientVersion,
+        fact.ingredientQuantity,
+      ]),
+    ).toEqual([
+      ['LITER', 1, 2, 2],
+      ['LITER', 2, 3, 2.5],
+    ]);
+  });
+
+  it('既有食材有库存且单位不可换算：整单 422 且零写入（含前序条目）', async () => {
+    const db = await openDatabase({
+      driver: createNodeSqliteDriver({ path: ':memory:' }),
+      now: () => NOW,
+    });
+    await seedList(db, { id: 'list-incompatible' }, [
+      { id: 'item-ok-new', name: '黄瓜', quantity: 2, unit: 'PIECE' },
+      { id: 'item-bad-unit', name: '牛奶', quantity: 2, unit: 'PIECE' },
+    ]);
+    await db.withWriteTransaction(async (tx) => {
+      await tx.run(
+        `INSERT INTO "Ingredient" ("id","name","imagePath","category","quantity","unit","purchaseDate","expiryDate","location","minStock","maxStock","opened","notes","version","deletedAt","createdAt","updatedAt")
+         VALUES ('ing-milk-stock','牛奶',NULL,'蛋奶豆制',1,'LITER',NULL,NULL,NULL,NULL,NULL,0,NULL,1,NULL,?,?)`,
+        [T0, T0],
+      );
+    });
+    const ctx: ShoppingServiceContext = { database: db, now: () => NOW };
+    await expect(
+      checkInShoppingItems(ctx, 'list-incompatible', {
+        version: 1,
+        operationId: 'op-incompatible',
+        itemIds: ['item-bad-unit', 'item-ok-new'],
+      }),
+    ).rejects.toMatchObject({ status: 422, code: 'SHOPPING_CHECKIN_QUANTITY_INVALID' });
+    expect(await count(db, 'Ingredient')).toBe(1);
+    expect(await count(db, 'InventoryBatch')).toBe(0);
+    expect(await count(db, 'InventoryLog')).toBe(0);
+    expect(await count(db, 'ShoppingCheckinOperation')).toBe(0);
+    expect(await outbox(db)).toHaveLength(0);
+    expect(await count(db, 'ShoppingListItem')).toBe(2);
+    const [list] = await db.query<{ version: number }>(
+      'SELECT "version" FROM "ShoppingList" WHERE "id" = ?',
+      ['list-incompatible'],
+    );
+    expect(list!.version).toBe(1);
+  });
+
+  it('同单先入库再遇到同名不兼容单位时，回滚已写入的食材和批次', async () => {
+    const db = await openDatabase({
+      driver: createNodeSqliteDriver({ path: ':memory:' }),
+      now: () => NOW,
+    });
+    const listId = 'list-incompatible-new';
+    await seedList(db, { id: listId }, [
+      { id: 'item-a', name: '牛奶', quantity: 1, unit: 'LITER', sortOrder: 0 },
+      { id: 'item-b', name: '牛奶', quantity: 2, unit: 'PIECE', sortOrder: 1 },
+    ]);
+    await expect(
+      checkInShoppingItems({ database: db, now: () => NOW }, listId, {
+        version: 1,
+        operationId: 'op-incompatible-new',
+        itemIds: ['item-a', 'item-b'],
+      }),
+    ).rejects.toMatchObject({ status: 422, code: 'SHOPPING_CHECKIN_QUANTITY_INVALID' });
+    expect(await count(db, 'Ingredient')).toBe(0);
+    expect(await count(db, 'InventoryBatch')).toBe(0);
+    expect(await count(db, 'InventoryLog')).toBe(0);
+    expect(await count(db, 'ShoppingCheckinOperation')).toBe(0);
+    expect(await outbox(db)).toHaveLength(0);
+    expect(await db.query('SELECT "version" FROM "ShoppingList" WHERE "id" = ?', [listId])).toEqual(
+      [{ version: 1 }],
+    );
+    expect(await count(db, 'ShoppingListItem')).toBe(2);
   });
 });

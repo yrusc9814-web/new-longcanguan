@@ -2,8 +2,10 @@
  * 购物清单服务：D5 补缺、勾选入库与幂等购物同步。
  *
  * 关键约束（T-004 铁律）：
- * - 默认活跃清单固定 ID `shopping_list_active_default`；自动补建的空清单**不入发件箱**，
- *   仅真实用户变更才入队；
+ * - 默认活跃清单固定 ID `shopping_list_active_default`；端云预置 v1，冷启动补建与软删恢复
+ *   **都不入发件箱**，仅真实用户变更才入队；恢复时保留既有版本链（不重置、不推进版本）；
+ * - 清单 upsert 的 `baseVersion` 只取本次写入的期望版本：新建副单为 null（载荷 version 1），
+ *   其余写入一律等于 `expectedVersion`，不再借发件箱瞬态推断；
  * - `replenish-recipe` 同菜谱同食材对齐最新差额，跨菜谱与手工项保持独立行，整批只推进一次版本；
  * - `check-in` 勾选买完与入库同事务完成；含无结构化数量（如「少许」）的条目整单 422 回滚；
  * - `ShoppingCheckinOperation` 以 operationId 幂等防重，重复请求返回首次结果；
@@ -22,7 +24,6 @@ import {
 
 import type { DatabaseClient, WriteTransaction } from '../../db/database.js';
 import { VersionConflictError } from '../../db/errors.js';
-import { SYNC_OUTBOX_TABLE } from '../../db/schema.js';
 import type { SqlValue } from '../../db/types.js';
 import { LocalApiError } from '../../local-api/protocol.js';
 import { localDate, validationError } from '../common.js';
@@ -37,6 +38,7 @@ import { normalizeIngredientCategory } from '../ingredients/categories.js';
 import type { IngredientRow } from '../ingredients/dto.js';
 import { isQuantityUnit } from '../ingredients/dto.js';
 import { roundQuantity } from '../ingredients/numbers.js';
+import { newLocalId } from '../meal-records/ids.js';
 import { convertQuantity } from '../units.js';
 import {
   ITEM_ORDER,
@@ -169,24 +171,24 @@ async function listUpsertPayload(
   };
 }
 
-/** 真实用户变更才入队：默认空清单初始化不得走这里。 */
+/**
+ * 真实用户变更才入队：默认空清单初始化与软删恢复不得走这里。
+ *
+ * `baseVersion` 由调用方给出真实期望版本，不再读取发件箱瞬态状态推断：
+ * 新建副单为 `null`（载荷 version 1），其余实际写入一律等于本次 `expectedVersion`。
+ */
 async function enqueueListUpsert(
   tx: WriteTransaction,
   list: ShoppingListRow,
-  nextId: () => string,
+  baseVersion: number | null,
 ): Promise<void> {
   const payload = await listUpsertPayload(tx, list);
-  // 云端没有该清单的任何版本时，本次就是新建：baseVersion 必须为 null，否则重放会误判冲突。
-  const [prior] = await tx.query<{ id: string }>(
-    `SELECT "id" FROM "${SYNC_OUTBOX_TABLE}" WHERE "entity" = 'ShoppingList' AND "entityId" = ? LIMIT 1`,
-    [list.id],
-  );
   await tx.enqueue({
-    opId: nextId(),
+    opId: newLocalId(),
     entity: 'ShoppingList',
     entityId: list.id,
     kind: 'upsert',
-    baseVersion: prior ? list.version - 1 : null,
+    baseVersion,
     payload: { ...payload } as unknown as Record<string, unknown>,
   });
 }
@@ -223,9 +225,11 @@ async function nextSortOrder(tx: WriteTransaction, listId: string): Promise<numb
 }
 
 /**
- * 确保默认活跃清单存在（只在本机没有任何活跃清单时补建）。
+ * 确保默认活跃清单存在（只在本机没有任何活跃清单时处理）。
  *
- * 补建的空清单必须**零发件箱**：它不是用户真实变更，云端不需要重复创建。
+ * - 端云预置默认清单 v1；冷启动补建同一固定 ID，**零发件箱**（不是用户真实变更）；
+ * - 默认清单被软删且无其他活跃清单时，原地恢复为空活跃单，保留既有版本链：
+ *   不重置版本、不推进版本、不写发件箱。
  */
 async function ensureDefaultList(
   database: DatabaseClient,
@@ -237,6 +241,24 @@ async function ensureDefaultList(
        ORDER BY "updatedAt" DESC, "id" ASC LIMIT 1`,
     );
     if (active[0]) return active[0];
+
+    const [deleted] = await tx.query<ShoppingListRow>(
+      'SELECT * FROM "ShoppingList" WHERE "id" = ? AND "deletedAt" IS NOT NULL',
+      [DEFAULT_SHOPPING_LIST_ID],
+    );
+    if (deleted) {
+      // 恢复为空活跃单：清空旧条目，但保留既有版本链（版本号不动）。
+      await tx.run('DELETE FROM "ShoppingListItem" WHERE "shoppingListId" = ?', [deleted.id]);
+      await tx.run(
+        `UPDATE "ShoppingList" SET "status" = 'ACTIVE', "deletedAt" = NULL, "updatedAt" = ?
+         WHERE "id" = ?`,
+        [timestamp, deleted.id],
+      );
+      const restored = await readListRow(tx, deleted.id);
+      if (!restored) throw listNotFound();
+      return restored;
+    }
+
     await tx.run(
       `INSERT INTO "ShoppingList" ("id", "name", "status", "notes", "version", "deletedAt", "createdAt", "updatedAt")
        VALUES (?, ?, 'ACTIVE', NULL, 1, NULL, ?, ?)
@@ -289,7 +311,7 @@ export interface CreateListInput {
   readonly notes?: string | null;
 }
 
-/** `POST /shopping-lists`：真实用户创建，入队单条清单 upsert（items 为空）。 */
+/** `POST /shopping-lists`：真实用户创建副单，入队单条清单 upsert（items 为空，version 1）。 */
 export async function createShoppingList(
   ctx: ShoppingServiceContext,
   input: CreateListInput,
@@ -306,7 +328,8 @@ export async function createShoppingList(
     );
     const list = await readListRow(tx, id);
     if (!list) throw listNotFound();
-    await enqueueListUpsert(tx, list, nextId);
+    // 副单是云端从未存在的新实体：baseVersion 为 null，载荷 version 为 1。
+    await enqueueListUpsert(tx, list, null);
     return readListDto(tx, list);
   });
 }
@@ -391,7 +414,7 @@ export async function addShoppingItem(
       ],
     );
     const next = await bumpListVersion(tx, listId, input.version, timestamp);
-    await enqueueListUpsert(tx, next, nextId);
+    await enqueueListUpsert(tx, next, input.version);
     return readListDto(tx, next);
   });
 }
@@ -410,7 +433,6 @@ export async function updateShoppingItem(
   input: UpdateItemInput,
 ): Promise<ReturnType<typeof toShoppingListDto>> {
   const timestamp = ctx.now().toISOString();
-  const nextId = idFactory(ctx);
   return ctx.database.withWriteTransaction(async (tx) => {
     const [item] = await tx.query<ShoppingListItemRow>(
       'SELECT * FROM "ShoppingListItem" WHERE "id" = ?',
@@ -471,7 +493,7 @@ export async function updateShoppingItem(
       itemId,
     ]);
     const next = await bumpListVersion(tx, list.id, input.version, timestamp);
-    await enqueueListUpsert(tx, next, nextId);
+    await enqueueListUpsert(tx, next, input.version);
     return readListDto(tx, next);
   });
 }
@@ -483,7 +505,6 @@ export async function deleteShoppingItem(
   version: number,
 ): Promise<{ id: string; deleted: true }> {
   const timestamp = ctx.now().toISOString();
-  const nextId = idFactory(ctx);
   return ctx.database.withWriteTransaction(async (tx) => {
     const [item] = await tx.query<ShoppingListItemRow>(
       'SELECT * FROM "ShoppingListItem" WHERE "id" = ?',
@@ -497,7 +518,7 @@ export async function deleteShoppingItem(
     }
     await tx.run('DELETE FROM "ShoppingListItem" WHERE "id" = ?', [itemId]);
     const next = await bumpListVersion(tx, list.id, version, timestamp);
-    await enqueueListUpsert(tx, next, nextId);
+    await enqueueListUpsert(tx, next, version);
     return { id: itemId, deleted: true as const };
   });
 }
@@ -509,7 +530,6 @@ export async function clearCompletedItems(
   version: number,
 ): Promise<{ list: ReturnType<typeof toShoppingListDto>; cleared: number }> {
   const timestamp = ctx.now().toISOString();
-  const nextId = idFactory(ctx);
   return ctx.database.withWriteTransaction(async (tx) => {
     const list = await readListRow(tx, listId);
     if (!list) throw listNotFound();
@@ -523,7 +543,7 @@ export async function clearCompletedItems(
     const cleared = removed.changes;
     if (cleared === 0) return { list: await readListDto(tx, list), cleared };
     const next = await bumpListVersion(tx, listId, version, timestamp);
-    await enqueueListUpsert(tx, next, nextId);
+    await enqueueListUpsert(tx, next, version);
     return { list: await readListDto(tx, next), cleared };
   });
 }
@@ -653,7 +673,7 @@ export async function replenishRecipe(
       sortOrder += 1;
     }
     const next = await bumpListVersion(tx, listId, input.version, timestamp);
-    await enqueueListUpsert(tx, next, nextId);
+    await enqueueListUpsert(tx, next, input.version);
     return readListDto(tx, next);
   });
 }
@@ -707,6 +727,28 @@ async function findMatchIngredient(
   const target = normalizeName(item.ingredientNameSnapshot);
   const matched = candidates.filter((row) => normalizeName(row.name) === target);
   return matched.length === 1 ? matched[0]! : null;
+}
+
+/**
+ * 既有食材与本次入库单位的关系判定。
+ *
+ * - 可换算：直接累加，不需要动基础单位；
+ * - 不可换算但有库存：整单 422（不静默换算，也不悄悄改写库存单位）；
+ * - 不可换算且空库存：允许把基础单位对齐为本次真实单位，返回 true 交调用方刷新内存态后重算。
+ */
+async function unitNeedsReset(
+  tx: WriteTransaction,
+  ingredient: IngredientRow,
+  unit: QuantityUnit,
+  name: string,
+): Promise<boolean> {
+  if (convertQuantity(1, unit, ingredient.unit) !== null) return false;
+  const activeBatches = await loadBatches(tx, ingredient.id);
+  const hasStock = ingredient.quantity > 0 || activeBatches.some((batch) => batch.quantity > 0);
+  if (hasStock) {
+    throw checkinQuantityInvalid(`「${name}」的单位与现有库存「${ingredient.name}」不兼容`);
+  }
+  return true;
 }
 
 /**
@@ -782,23 +824,12 @@ export async function checkInShoppingItems(
         );
       }
     }
-    const matches = new Map<string, IngredientRow | null>();
-    const unitReset = new Set<string>();
+    // 先整批只读校验一次：任意一条已知食材单位不兼容即整单 422（写入前的快速失败）。
+    // 循环内还会按最新状态复核（含同单前序新建的同名食材）。
     for (const row of selected) {
       const matched = await findMatchIngredient(tx, row);
-      matches.set(row.id, matched);
       if (!matched) continue;
-      const unit = row.unit as QuantityUnit;
-      if (convertQuantity(1, unit, matched.unit) !== null) continue;
-      const activeBatches = await loadBatches(tx, matched.id);
-      const hasStock = matched.quantity > 0 || activeBatches.some((batch) => batch.quantity > 0);
-      if (hasStock) {
-        throw checkinQuantityInvalid(
-          `「${row.ingredientNameSnapshot}」的单位与现有库存「${matched.name}」不兼容`,
-        );
-      }
-      // 空库存 + 单位不可换算：允许把基础单位对齐为本批次的真实单位，避免入库数量丢失。
-      unitReset.add(matched.id);
+      await unitNeedsReset(tx, matched, row.unit as QuantityUnit, row.ingredientNameSnapshot);
     }
 
     const inventory: ShoppingCheckinInventoryFactPayload[] = [];
@@ -806,49 +837,29 @@ export async function checkInShoppingItems(
       const quantity = row.quantity as number;
       const unit = row.unit as QuantityUnit;
       const name = row.ingredientNameSnapshot;
-      let ingredient = matches.get(row.id) ?? null;
+      // 每行按当前库状态重新匹配：同单前序新建的同名食材要被后续行累加，
+      // 既有食材也要读取最新版本，避免同批重复入库产生重复食材或使用旧 version。
+      let ingredient = await findMatchIngredient(tx, row);
       let createdIngredient = false;
+      let ingredientBaseVersion: number | null = null;
       if (ingredient) {
-        // 同批多个条目可能指向同一食材：每条都重新读取，避免使用上一个条目的旧 version。
-        const [latest] = await tx.query<IngredientRow>(
-          'SELECT * FROM "Ingredient" WHERE "id" = ? AND "deletedAt" IS NULL',
-          [ingredient.id],
-        );
-        if (!latest) throw itemInvalid('入库食材已被删除，请刷新后重试');
-        ingredient = latest;
-      }
-      if (!ingredient) {
-        const ingredientId = nextId();
-        await tx.run(
-          `INSERT INTO "Ingredient"
-            ("id", "name", "imagePath", "category", "quantity", "unit", "purchaseDate", "expiryDate",
-             "location", "minStock", "maxStock", "opened", "notes", "version", "deletedAt", "createdAt", "updatedAt")
-           VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0, NULL, 1, NULL, ?, ?)`,
-          [
-            ingredientId,
-            name,
-            normalizeIngredientCategory(row.category, name),
-            quantity,
-            unit,
-            purchaseDate,
-            timestamp,
-            timestamp,
-          ],
-        );
-        const [createdRow] = await tx.query<IngredientRow>(
-          'SELECT * FROM "Ingredient" WHERE "id" = ?',
-          [ingredientId],
-        );
-        ingredient = createdRow!;
-        createdIngredient = true;
-      } else {
-        if (unitReset.has(ingredient.id)) {
+        const resetUnit = await unitNeedsReset(tx, ingredient, unit, name);
+        if (resetUnit) {
+          // 空库存 + 单位不可换算：把基础单位对齐为本批次真实单位，避免入库数量丢失。
           await tx.run('UPDATE "Ingredient" SET "unit" = ?, "updatedAt" = ? WHERE "id" = ?', [
             unit,
             timestamp,
             ingredient.id,
           ]);
         }
+        // 换单位后必须刷新内存态，后续库存汇总才按新基础单位计算。
+        const [latest] = await tx.query<IngredientRow>(
+          'SELECT * FROM "Ingredient" WHERE "id" = ? AND "deletedAt" IS NULL',
+          [ingredient.id],
+        );
+        if (!latest) throw itemInvalid('入库食材已被删除，请刷新后重试');
+        ingredient = latest;
+        ingredientBaseVersion = latest.version;
         // 历史存量（quantity > 0 但无活批次）先真实补建，避免入库后汇总数量丢失。
         const activeBatches = await loadBatches(tx, ingredient.id);
         const healed = await persistImplicitBatch(
@@ -875,7 +886,10 @@ export async function checkInShoppingItems(
             ingredientNameSnapshot: ingredient.name,
             ingredientUnit: ingredient.unit,
             ingredientQuantity: ingredient.quantity,
+            // 补建历史批次不推进食材版本：前后版本一致。
+            ingredientBaseVersion: ingredient.version,
             ingredientVersion: ingredient.version,
+            ingredientCategory: normalizeIngredientCategory(ingredient.category, ingredient.name),
             batchId: healed.batchId,
             batchQuantity: healed.quantity,
             batchUnit: healed.unit,
@@ -885,6 +899,30 @@ export async function checkInShoppingItems(
             executedAt: timestamp,
           });
         }
+      } else {
+        const ingredientId = nextId();
+        await tx.run(
+          `INSERT INTO "Ingredient"
+            ("id", "name", "imagePath", "category", "quantity", "unit", "purchaseDate", "expiryDate",
+             "location", "minStock", "maxStock", "opened", "notes", "version", "deletedAt", "createdAt", "updatedAt")
+           VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0, NULL, 1, NULL, ?, ?)`,
+          [
+            ingredientId,
+            name,
+            normalizeIngredientCategory(row.category, name),
+            quantity,
+            unit,
+            purchaseDate,
+            timestamp,
+            timestamp,
+          ],
+        );
+        const [createdRow] = await tx.query<IngredientRow>(
+          'SELECT * FROM "Ingredient" WHERE "id" = ?',
+          [ingredientId],
+        );
+        ingredient = createdRow!;
+        createdIngredient = true;
       }
 
       const batchId = nextId();
@@ -915,19 +953,23 @@ export async function checkInShoppingItems(
       const batches = await loadBatches(tx, ingredient.id);
       const summary = summarizeBatchMeta(batches);
       const total = summarizeQuantity(batches, ingredient.unit);
+      const finalCategory = row.category
+        ? normalizeIngredientCategory(row.category, ingredient.name)
+        : normalizeIngredientCategory(ingredient.category, ingredient.name);
+      // 首次入库的新食材保留 v1（版本链起点）；既有食材按乐观锁 +1。
+      const nextVersion = createdIngredient ? ingredient.version : ingredient.version + 1;
       const updated = await tx.run(
         `UPDATE "Ingredient" SET
            "quantity" = ?, "purchaseDate" = ?, "expiryDate" = ?, "location" = ?, "category" = ?,
-           "version" = "version" + 1, "updatedAt" = ?
+           "version" = ?, "updatedAt" = ?
          WHERE "id" = ? AND "version" = ? AND "deletedAt" IS NULL`,
         [
           total,
           summary.purchaseDate ?? purchaseDate,
           summary.expiryDate ?? ingredient.expiryDate,
           summary.location ?? ingredient.location,
-          row.category
-            ? normalizeIngredientCategory(row.category, ingredient.name)
-            : ingredient.category,
+          finalCategory,
+          nextVersion,
           timestamp,
           ingredient.id,
           ingredient.version,
@@ -948,7 +990,9 @@ export async function checkInShoppingItems(
         ingredientNameSnapshot: ingredient.name,
         ingredientUnit: ingredient.unit,
         ingredientQuantity: total,
-        ingredientVersion: ingredient.version + 1,
+        ingredientBaseVersion,
+        ingredientVersion: nextVersion,
+        ingredientCategory: finalCategory,
         batchId,
         batchQuantity: quantity,
         batchUnit: unit,
@@ -1002,7 +1046,7 @@ export async function checkInShoppingItems(
     };
     // `ShoppingList` 命令类型已由 db 层 `SYNC_COMMAND_ENTITIES` 开通，无需窄化。
     await tx.enqueue({
-      opId: nextId(),
+      opId: newLocalId(),
       entity: 'ShoppingList',
       entityId: listId,
       kind: 'command',

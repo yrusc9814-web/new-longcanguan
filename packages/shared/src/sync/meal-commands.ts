@@ -43,7 +43,7 @@ export interface MealRecordFactPayload {
   readonly updatedAt: string;
   /** 落库的子项主键，按 sortOrder 升序。 */
   readonly itemIds: readonly string[];
-  /** MealRecordDiner 行主键，按 dinerIds 顺序。 */
+  /** MealRecordDiner 行主键，按对应的就餐人写入顺序排列。 */
   readonly dinerRowIds: readonly string[];
 }
 
@@ -118,6 +118,7 @@ export interface RecipeCookCheckinPayload {
     readonly satiety: number | null;
     readonly cost: number | null;
     readonly sourceType: MealRecordSourceType;
+    /** `dinerIds[i]` 对应 `record.dinerRowIds[i]` 所标识的落库行。 */
     readonly dinerIds: readonly string[];
   };
 }

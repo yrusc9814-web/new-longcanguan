@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { strFromU8, unzipSync } from 'fflate';
 import { RETAINED_ENDPOINTS, RETAINED_MODELS } from '@dafan/shared/contracts';
+import type { RecipeCookCheckinPayload, ShoppingCheckinCommandPayload } from '@dafan/shared/sync';
 import type {
   DashboardDto,
   HealthData,
@@ -117,6 +118,7 @@ async function runBusiness(prefix: string, retained: typeof RETAINED_ENDPOINTS) 
   const diner = await ok<Versioned>('/diners', 'POST', { name: `${prefix}-diner` });
   await ok('/diners');
   await ok(`/diners/${diner.id}`, 'PUT', { version: diner.version, notes: prefix });
+  const secondDiner = await ok<Created>('/diners', 'POST', { name: `${prefix}-guest` });
   const tool = await ok<Versioned>('/tools', 'POST', { name: `${prefix}-tool` });
   await ok('/tools');
   const updatedTool = await ok<Versioned>(`/tools/${tool.id}`, 'PUT', {
@@ -138,6 +140,10 @@ async function runBusiness(prefix: string, retained: typeof RETAINED_ENDPOINTS) 
   const favoredStore = await ok<Versioned>(`/stores/${store.id}/favorite`, 'POST', {
     version: updatedStore.version,
     favorite: true,
+  });
+  const storeForPlan = await ok<Created>('/stores', 'POST', {
+    name: `${prefix}-plan-store`,
+    supportsDineIn: true,
   });
   await ok(`/stores/${store.id}?version=${favoredStore.version}`, 'DELETE');
 
@@ -233,14 +239,30 @@ async function runBusiness(prefix: string, retained: typeof RETAINED_ENDPOINTS) 
     reverted.plan.status === 'PLANNED' && reverted.removedRecord.id === first.record.id,
     'Uncomplete removes auto draft',
   );
-  const revived = await ok<Completed>(`/plans/${plan.id}/complete`, 'POST', {
+  const changedPlan = await ok<MealPlanDto>(`/plans/${plan.id}`, 'PUT', {
     version: reverted.plan.version,
+    items: [{ itemType: 'STORE', storeId: storeForPlan.id }],
+  });
+  const revived = await ok<Completed>(`/plans/${plan.id}/complete`, 'POST', {
+    version: changedPlan.version,
   });
   check(
-    revived.record.id === first.record.id && revived.record.status === 'DRAFT',
-    'Completion revives the same draft',
+    revived.record.id === first.record.id &&
+      revived.record.status === 'DRAFT' &&
+      revived.record.sourceType === 'DINE_IN' &&
+      revived.record.items[0]?.storeId === storeForPlan.id,
+    'Completion revives the same draft with the new dining-out plan',
   );
-  await ok(`/records/${revived.record.id}?version=${revived.record.version}`, 'DELETE');
+  const changedDraft = await ok<MealRecordDto>(`/records/${revived.record.id}`, 'PUT', {
+    version: revived.record.version,
+    notes: `${prefix}-edited-draft`,
+  });
+  check(
+    (await call(`/plans/${plan.id}/uncomplete`, 'POST', { version: revived.plan.version }))
+      .status === 409,
+    'Uncomplete rejects an edited draft',
+  );
+  await ok(`/records/${revived.record.id}?version=${changedDraft.version}`, 'DELETE');
   const plans = await ok<MealPlanDto[] | { items: MealPlanDto[] }>(
     `/plans?from=${date}&to=${date}`,
   );
@@ -339,7 +361,23 @@ async function runBusiness(prefix: string, retained: typeof RETAINED_ENDPOINTS) 
     'Rendered WebP portrait and smaller portrait thumbnail',
   );
 
+  check(
+    (
+      await call(`/records/${manual.id}`, 'PUT', {
+        version: confirmed.version,
+        imagePath: '/uploads/unregistered.webp',
+      })
+    ).status === 400,
+    'Reject unregistered single-image reference',
+  );
+  const singleImage = await ok<MealRecordDto>(`/records/${manual.id}`, 'PUT', {
+    version: confirmed.version,
+    imagePath: asset.url,
+  });
+  check(singleImage.imagePath === asset.url, 'Accept registered single-image reference');
+
   const cookPath = `/recipes/${recipe.id}/cook-checkin`;
+  const dinerIds = [diner.id, secondDiner.id].sort().reverse();
   const cookBody = {
     recordDate: date,
     mealType: 'DINNER',
@@ -347,7 +385,7 @@ async function runBusiness(prefix: string, retained: typeof RETAINED_ENDPOINTS) 
     photos: [asset.url],
     satiety: 7,
     cost: 0,
-    dinerIds: [diner.id],
+    dinerIds,
   };
   const cooked = await ok<{ record: MealRecordDto; repeated: boolean }>(cookPath, 'POST', cookBody);
   check(
@@ -365,10 +403,31 @@ async function runBusiness(prefix: string, retained: typeof RETAINED_ENDPOINTS) 
     'Conflicting cook check-in rejected',
   );
 
+  type Recommended = { results: { resultId: string; score: number }[] };
+  const unpenalized = await ok<Recommended>('/recommendations/random', 'POST', {
+    sourceTypes: ['RECIPE'],
+    repeatDays: 0,
+  });
+  const penalized = await ok<Recommended>('/recommendations/random', 'POST', {
+    sourceTypes: ['RECIPE'],
+    repeatDays: 1,
+  });
+  check(
+    unpenalized.results[0]?.resultId === recipe.id &&
+      penalized.results[0]?.resultId === recipe.id &&
+      unpenalized.results[0].score - penalized.results[0].score === 40,
+    'Recommendation skips the recent-meal penalty at repeatDays zero',
+  );
+
   const active = await ok<ShoppingListDto[]>('/shopping-lists?status=ACTIVE');
   let list = active[0]!;
   check(list.id === 'shopping_list_active_default', 'Fixed default shopping list ID');
   const shopPath = `/shopping-lists/${list.id}`;
+  const emptyStock = await ok<Versioned>('/ingredients', 'POST', {
+    name: `${prefix}-empty-stock`,
+    quantity: 0,
+    unit: 'PIECE',
+  });
   const secondaryList = await ok<ShoppingListDto>('/shopping-lists', 'POST', {
     name: `${prefix}-list`,
   });
@@ -415,7 +474,7 @@ async function runBusiness(prefix: string, retained: typeof RETAINED_ENDPOINTS) 
     {
       version: list.version,
       recipeId: recipe.id,
-      items: [{ ingredientName: `${prefix}-rice`, quantity: 100, unit: 'GRAM' }],
+      items: [{ ingredientName: `${prefix}-rice`, quantity: 60, unit: 'GRAM' }],
     },
   );
   list = 'list' in replenished ? replenished.list : replenished;
@@ -433,17 +492,44 @@ async function runBusiness(prefix: string, retained: typeof RETAINED_ENDPOINTS) 
     ),
     'Checking an item does not stock the pantry',
   );
+  list = await ok<ShoppingListDto>(`${shopPath}/items`, 'POST', {
+    version: list.version,
+    ingredientName: `${prefix}-rice`,
+    quantity: 40,
+    unit: 'GRAM',
+  });
+  const duplicate = list.items.find(
+    (row) => row.id !== item.id && row.ingredientName === `${prefix}-rice`,
+  );
+  check(duplicate, 'Create a second purchase for the same ingredient');
+  list = await ok<ShoppingListDto>(`${shopPath}/items`, 'POST', {
+    version: list.version,
+    ingredientId: emptyStock.id,
+    ingredientName: `${prefix}-empty-stock`,
+    quantity: 30,
+    unit: 'GRAM',
+  });
+  const unitResetItem = list.items.find((row) => row.ingredientId === emptyStock.id);
+  check(unitResetItem, 'Create purchase in a new unit for empty stock');
   const operationId = crypto.randomUUID();
   const checkin = await ok<{ imported: { operationId: string } }>(`${shopPath}/check-in`, 'POST', {
     version: list.version,
     operationId,
-    itemIds: [item.id],
+    itemIds: [item.id, duplicate.id, unitResetItem.id],
   });
   check(checkin.imported.operationId === operationId, 'Shopping check-in commits');
-  const shoppingIngredient = (
-    await ok<{ items: IngredientDto[] }>('/ingredients?pageSize=100')
-  ).items.find((value) => value.name === `${prefix}-rice`);
-  check(shoppingIngredient?.quantity === 100, 'Shopping check-in stocks pantry');
+  const pantry = (await ok<{ items: IngredientDto[] }>('/ingredients?pageSize=100')).items;
+  const rice = pantry.filter((row) => row.name === `${prefix}-rice`);
+  const shoppingIngredient = rice[0];
+  check(
+    rice.length === 1 && shoppingIngredient?.quantity === 100 && shoppingIngredient.version === 2,
+    'Same-name purchases accumulate in one ingredient',
+  );
+  const restocked = pantry.find((row) => row.id === emptyStock.id);
+  check(
+    restocked?.quantity === 30 && restocked.unit === 'GRAM',
+    'Empty stock keeps the new quantity and unit',
+  );
 
   const pin = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0]! % 900000));
   const settings = await ok<Settings>('/settings', 'PUT', {
@@ -515,6 +601,7 @@ async function runBusiness(prefix: string, retained: typeof RETAINED_ENDPOINTS) 
     pin,
     grant: grant.token,
     dimensions: { main, thumb },
+    dinerIds,
     successfulRoutes: exercised.size,
   };
 }
@@ -526,6 +613,7 @@ interface BusinessResult {
   pin: string;
   grant: string;
   dimensions: { main: number[]; thumb: number[] };
+  dinerIds: string[];
   successfulRoutes: number;
 }
 
@@ -653,7 +741,7 @@ try {
     true,
     'WebView local API is ready',
   );
-  const prefix = `T004-${randomUUID().slice(0, 8)}`;
+  const prefix = `T004b-${randomUUID().slice(0, 8)}`;
   const result = await evaluate<BusinessResult>(
     target.webSocketDebuggerUrl,
     `(${runBusiness.toString()})(${JSON.stringify(prefix)},${JSON.stringify(RETAINED_ENDPOINTS)})`,
@@ -676,6 +764,40 @@ try {
     assert.ok(Number.isFinite(Date.parse(JSON.parse(row.payloadJson).executedAt)));
   }
   for (const id of Object.values(ids)) assert.match(id, /^[\da-f-]+$/i);
+  const purchases = JSON.parse(rows.at(-1)!.payloadJson) as ShoppingCheckinCommandPayload;
+  const riceFacts = purchases.inventory.filter((fact) => fact.ingredientId === ids.ingredient);
+  assert.deepEqual(
+    riceFacts.map((fact) => [fact.ingredientBaseVersion, fact.ingredientVersion]),
+    [
+      [null, 1],
+      [1, 2],
+    ],
+  );
+  const shoppingVersions = sqlite<{ baseVersion: number; version: number }>(
+    `SELECT baseVersion, json_extract(payloadJson, '$.version') AS version FROM sync_outbox
+     WHERE entityId = 'shopping_list_active_default' AND kind = 'upsert' ORDER BY rowid`,
+  );
+  assert.equal(shoppingVersions.length, 4);
+  assert.deepEqual(
+    shoppingVersions.map(({ baseVersion, version }) => [baseVersion, version]),
+    [
+      [1, 2],
+      [2, 3],
+      [3, 4],
+      [4, 5],
+    ],
+  );
+  assert.equal(purchases.baseVersion, 5);
+  assert.equal(purchases.listVersion, 6);
+  const cooked = JSON.parse(rows.at(-2)!.payloadJson) as RecipeCookCheckinPayload;
+  assert.deepEqual([...cooked.request.dinerIds].sort(), [...result.dinerIds].sort());
+  const dinerRows = sqlite<{ id: string; dinerId: string }>(
+    `SELECT id, dinerId FROM MealRecordDiner WHERE mealRecordId = '${ids.record}'`,
+  );
+  assert.deepEqual(
+    cooked.record.dinerRowIds.map((id) => dinerRows.find((row) => row.id === id)?.dinerId),
+    cooked.request.dinerIds,
+  );
   assert.deepEqual(sqlite(`SELECT status FROM MealPlan WHERE id = '${ids.plan}'`), [
     { status: 'PLANNED' },
   ]);
@@ -747,6 +869,27 @@ try {
   assert.deepEqual(sqlite(`SELECT status FROM MealRecord WHERE id = '${ids.record}'`), [
     { status: 'CONFIRMED' },
   ]);
+  assert.equal(
+    await evaluate<boolean>(
+      target.webSocketDebuggerUrl,
+      `(async () => {
+      const path = '/api/v1/shopping-lists/shopping_list_active_default';
+      const read = await fetch(path);
+      const { data: list } = await read.json();
+      if (!read.ok || list.version !== 6) return false;
+      const write = await fetch(path + '/items', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ version: list.version, ingredientName: '恢复后加购', quantity: 1, unit: 'PIECE' }),
+      });
+      const { data: updated } = await write.json();
+      return write.ok && updated.version === 7;
+    })()`,
+    ),
+    true,
+    'Editing the restored default list advances its saved version',
+  );
+  assert.deepEqual(sqlite('SELECT baseVersion FROM sync_outbox'), [{ baseVersion: 6 }]);
   console.log(
     JSON.stringify(
       {
@@ -755,12 +898,14 @@ try {
         mobileData: false,
         user,
         checks: [
-          'plan-complete-uncomplete-revive-delete',
-          'cook-checkin-replay-conflict',
-          'shopping-replenish-checkin',
+          'plan-revive-after-change-and-protect-edited-draft',
+          'cook-checkin-diner-rows-and-idempotency',
+          'shopping-default-version-chain-and-inventory',
+          'registered-single-image-required',
+          'recommendation-zero-repeat-window',
           'pin-image-gate-expiry',
           'private-zip-binary-scan',
-          'restore-relock-and-unlock',
+          'restore-relock-unlock-and-resume-shopping-version',
           'native-sqlite-primary-keys-fk-outbox',
         ],
         exif: result.dimensions,

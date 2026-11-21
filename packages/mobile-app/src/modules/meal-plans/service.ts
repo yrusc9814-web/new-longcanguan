@@ -45,6 +45,9 @@ export interface MealPlanServiceContext {
   readonly newId: () => string;
 }
 
+/** 计划完成自动写草稿时唯一可能的两种来源类型。 */
+const AUTOMATIC_SOURCE_TYPES: readonly string[] = ['HOMEMADE', 'DINE_IN'];
+
 const PLAN_INCLUDE_ITEMS_SQL = `SELECT * FROM "MealPlanItem" WHERE "mealPlanId" = ? ORDER BY "sortOrder" ASC, rowid ASC`;
 const PLAN_DINER_ROWS_SQL = `SELECT d.* FROM "MealPlanDiner" pd JOIN "Diner" d ON d."id" = pd."dinerId"
   WHERE pd."mealPlanId" = ? ORDER BY pd.rowid ASC`;
@@ -516,7 +519,7 @@ export async function createPlan(
     const plan = await loadPlanDto(transaction, planId);
     if (!plan) throw new LocalApiError(500, 'INTERNAL_ERROR', '计划创建后读取失败');
     await transaction.enqueue({
-      opId: context.newId(),
+      opId: newLocalId(),
       entity: 'MealPlan',
       entityId: planId,
       kind: 'upsert',
@@ -612,7 +615,7 @@ export async function updatePlan(
     const plan = await loadPlanDto(transaction, id);
     if (!plan) throw notFound();
     await transaction.enqueue({
-      opId: context.newId(),
+      opId: newLocalId(),
       entity: 'MealPlan',
       entityId: id,
       kind: 'upsert',
@@ -644,7 +647,7 @@ export async function deletePlan(
       [timestamp, timestamp, id, version],
     );
     await transaction.enqueue({
-      opId: context.newId(),
+      opId: newLocalId(),
       entity: 'MealPlan',
       entityId: id,
       kind: 'delete',
@@ -756,14 +759,11 @@ function parseProof(value: string | null): PlanUncompleteProof | null {
   }
 }
 
-/** 自动草稿判定：字段全空且项目/就餐人与计划逐项一致。 */
-function isUneditedAutomaticRecord(
-  record: MealRecordRow,
-  snapshot: PlanUncompleteSnapshot,
-  sourceType: string,
-): boolean {
+/** 检查自动草稿的状态、来源与标量字段。 */
+function isUneditedAutomaticRecord(snapshot: PlanUncompleteSnapshot): boolean {
   return (
-    snapshot.sourceType === sourceType &&
+    snapshot.status === 'DRAFT' &&
+    AUTOMATIC_SOURCE_TYPES.includes(snapshot.sourceType) &&
     snapshot.title === null &&
     snapshot.recordTime === null &&
     snapshot.imagePath === null &&
@@ -782,6 +782,40 @@ function planSourceType(plan: MealPlanDto): string {
   return plan.items.length > 0 && plan.items.every((item) => item.itemType === 'STORE')
     ? 'DINE_IN'
     : 'HOMEMADE';
+}
+
+/**
+ * 撤销侧内容比对：日期、餐次、来源、关联计划、项目（关联类型 + sortOrder 顺序）与就餐人
+ * 必须全部与计划当前内容逐项一致，否则视为用户改过记录，不能自动软删。
+ */
+function matchesPlanContent(
+  plan: MealPlanDto,
+  planId: string,
+  snapshot: PlanUncompleteSnapshot,
+): boolean {
+  if (
+    snapshot.recordDate !== plan.planDate ||
+    snapshot.mealType !== plan.mealType ||
+    snapshot.sourceType !== planSourceType(plan) ||
+    snapshot.relatedPlanId !== planId ||
+    snapshot.sourceMealPlanId !== planId
+  )
+    return false;
+  const planItems = plan.items.map((item) => ({
+    itemType: item.itemType,
+    mealRole: item.mealRole ?? null,
+    recipeId: item.recipeId ?? null,
+    storeId: item.storeId ?? null,
+    customName: item.customName ?? null,
+    sortOrder: item.sortOrder,
+  }));
+  if (JSON.stringify(planItems) !== JSON.stringify(snapshot.items)) return false;
+  const planDinerIds = plan.diners.map((diner) => diner.id);
+  const recordDinerIds = new Set(snapshot.dinerIds.filter((id) => id !== null));
+  return (
+    planDinerIds.length === recordDinerIds.size &&
+    planDinerIds.every((id) => recordDinerIds.has(id))
+  );
 }
 
 async function hasConsumptionHistory(
@@ -857,17 +891,14 @@ export async function completePlan(
         oldDinerRows.map((row) => row.dinerId),
       );
       const proof = parseProof(existing.planUncompleteProof);
-      const snapshotMatches =
-        proof !== null &&
-        proof.sourcePlanId === id &&
-        proof.sourceRecordId === existing.id &&
-        proof.sourceRecordVersion === existing.version &&
-        JSON.stringify(proof.snapshot) === JSON.stringify(snapshot);
       if (
         plan.status === 'COMPLETED' ||
         !proof ||
-        !snapshotMatches ||
-        !isUneditedAutomaticRecord(existing, snapshot, sourceType)
+        proof.sourcePlanId !== id ||
+        proof.sourceRecordId !== existing.id ||
+        proof.sourceRecordVersion !== existing.version ||
+        JSON.stringify(proof.snapshot) !== JSON.stringify(snapshot) ||
+        !isUneditedAutomaticRecord(proof.snapshot)
       )
         throw conflict('关联饮食记录包含用户编辑或无法证明为自动草稿，不能覆盖；请先处理该记录');
       if (await hasConsumptionHistory(transaction, existing.id)) {
@@ -1001,7 +1032,7 @@ export async function completePlan(
     );
     const inventoryDeductionPromptEnabled = sqlBoolean(settings?.autoDeductInventory ?? false);
     await enqueueMealCommand(transaction, {
-      opId: context.newId(),
+      opId: newLocalId(),
       entity: 'MealPlan',
       entityId: id,
       commandType: 'PLAN_COMPLETE',
@@ -1106,7 +1137,7 @@ export async function uncompletePlan(
         items,
         dinerRows.map((row) => row.dinerId),
       );
-      if (!isUneditedAutomaticRecord(source, snapshot, planSourceType(plan)))
+      if (!isUneditedAutomaticRecord(snapshot) || !matchesPlanContent(plan, id, snapshot))
         throw conflict('关联饮食记录包含用户编辑，不能撤销完成；请先处理该记录');
       const proof: PlanUncompleteProof = {
         origin: 'PLAN_UNCOMPLETE',
@@ -1140,7 +1171,7 @@ export async function uncompletePlan(
     const nextPlan = await loadPlanDto(transaction, id);
     if (!nextPlan) throw notFound();
     await enqueueMealCommand(transaction, {
-      opId: context.newId(),
+      opId: newLocalId(),
       entity: 'MealPlan',
       entityId: id,
       commandType: 'PLAN_UNCOMPLETE',
