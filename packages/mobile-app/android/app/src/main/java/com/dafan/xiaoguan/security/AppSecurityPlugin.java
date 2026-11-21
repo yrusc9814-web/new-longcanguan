@@ -49,9 +49,15 @@ public final class AppSecurityPlugin extends Plugin {
         Boolean lockedPendingWipe = call.getBoolean("lockedPendingWipe");
         Boolean pinRequired = call.getBoolean("pinRequired");
         Boolean pinUnlocked = call.getBoolean("pinUnlocked");
+        Object expiry = call.getData().opt("pinExpiresAt");
+        if (expiry != null && (!(expiry instanceof Number) || ((Number) expiry).longValue() < 0)) {
+            call.reject("PIN expiry must be a timestamp", "INVALID_GATE_STATE");
+            return;
+        }
+        Long pinExpiresAt = expiry == null ? null : ((Number) expiry).longValue();
 
         try {
-            call.resolve(toJs(service().setGateState(lockedPendingWipe, pinRequired, pinUnlocked)));
+            call.resolve(toJs(service().setGateState(lockedPendingWipe, pinRequired, pinUnlocked, pinExpiresAt)));
         } catch (SecurityPersistenceException ex) {
             call.reject("Unable to apply the local security gate", "GATE_UPDATE_FAILED");
         }

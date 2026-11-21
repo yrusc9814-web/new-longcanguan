@@ -6,21 +6,29 @@ export interface GateState {
   pinUnlocked: boolean;
 }
 
+export type GateUpdate = Partial<GateState> & { pinExpiresAt?: number };
+
 export interface AppSecurityBridge {
   getGateState(): Promise<GateState>;
-  setGateState(update: Partial<GateState>): Promise<GateState>;
+  setGateState(update: GateUpdate): Promise<GateState>;
   getMemberToken(): Promise<{ memberToken: string | null }>;
   setMemberToken(options: { memberToken: string }): Promise<void>;
   clearMemberToken(): Promise<void>;
 }
 
-export function createMemoryAppSecurity(): AppSecurityBridge {
+export function createMemoryAppSecurity(now = Date.now): AppSecurityBridge {
   let state: GateState = { lockedPendingWipe: false, pinRequired: false, pinUnlocked: false };
   let memberToken: string | null = null;
+  let pinExpiresAt = 0;
+
+  function readState() {
+    if (pinExpiresAt > 0 && pinExpiresAt <= now()) state.pinUnlocked = false;
+    return { ...state };
+  }
 
   return {
     async getGateState() {
-      return { ...state };
+      return readState();
     },
     async setGateState(update) {
       if (
@@ -35,7 +43,8 @@ export function createMemoryAppSecurity(): AppSecurityBridge {
         pinUnlocked: update.pinUnlocked ?? state.pinUnlocked,
       };
       if (state.lockedPendingWipe || !state.pinRequired) state.pinUnlocked = false;
-      return { ...state };
+      pinExpiresAt = state.pinUnlocked ? (update.pinExpiresAt ?? pinExpiresAt) : 0;
+      return readState();
     },
     async getMemberToken() {
       return { memberToken: state.lockedPendingWipe ? null : memberToken };

@@ -1,6 +1,8 @@
 import { CapacitorSQLite } from '@capacitor-community/sqlite';
 import { Capacitor } from '@capacitor/core';
 import { openCapacitorDatabase } from '../db/index.js';
+import { recoverBackupFiles } from '../modules/backup/service.js';
+import { createSettingsService } from '../modules/settings/service.js';
 import { appSecurity } from '../native/app-security.js';
 import { createPinSession } from '../native/pin-session.js';
 import { registerDomainRoutes } from './domains.js';
@@ -19,12 +21,28 @@ export function getDatabase() {
 
 export const pinSession = createPinSession(appSecurity);
 
-// A new WebView session has no verified PIN token in memory.
-const initialGate = pinSession.lock().catch(() => undefined);
+const settings = createSettingsService(getDatabase, pinSession);
+let initialGate: Promise<void> | undefined;
+
+function initializeGate() {
+  initialGate ??= (async () => {
+    // Android images stay locked until SQLite confirms the device's persisted PIN policy.
+    if (isAndroid) await pinSession.lock(true);
+    else await pinSession.lock();
+    if (isAndroid && !(await appSecurity.getGateState()).lockedPendingWipe) {
+      await recoverBackupFiles(await getDatabase());
+      await settings.initialize();
+    }
+  })().catch((error: unknown) => {
+    initialGate = undefined;
+    throw error;
+  });
+  return initialGate;
+}
 
 export const localApi = createLocalApiRouter({
   async readGateState() {
-    await initialGate;
+    await initializeGate();
     const { lockedPendingWipe, pinRequired } = await appSecurity.getGateState();
     return { pendingWipe: lockedPendingWipe, pinRequired };
   },
@@ -37,7 +55,8 @@ export const localApi = createLocalApiRouter({
   },
 });
 
-registerDomainRoutes(localApi, getDatabase);
+registerDomainRoutes(localApi, getDatabase, settings);
+void initializeGate().catch(() => undefined);
 
 // Install the local fetch before the deferred Google2 adapter executes.
 const nativeFetch = globalThis.fetch.bind(globalThis);

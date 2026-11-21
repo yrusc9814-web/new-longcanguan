@@ -8,7 +8,27 @@ export type SyncCursor = string;
 export type SyncValue = null | boolean | number | string | readonly SyncValue[] | SyncPayload;
 export type SyncPayload = { readonly [key: string]: SyncValue };
 
-export type SyncCommandType = 'INGREDIENT_CONSUME' | 'INGREDIENT_UPDATE_SYNC_BATCHES';
+export const SYNC_COMMAND_ENTITIES = {
+  INGREDIENT_CONSUME: 'Ingredient',
+  INGREDIENT_UPDATE_SYNC_BATCHES: 'Ingredient',
+  PLAN_COMPLETE: 'MealPlan',
+  PLAN_UNCOMPLETE: 'MealPlan',
+  RECORD_DELETE: 'MealRecord',
+  RECIPE_COOK_CHECKIN: 'MealRecord',
+  SHOPPING_CHECKIN: 'ShoppingList',
+} as const satisfies Record<string, SyncEntityName>;
+
+export type SyncCommandType = keyof typeof SYNC_COMMAND_ENTITIES;
+
+export type SyncCommandTarget = {
+  [Command in SyncCommandType]: {
+    readonly commandType: Command;
+    readonly entity: (typeof SYNC_COMMAND_ENTITIES)[Command];
+    readonly baseVersion: Command extends 'RECIPE_COOK_CHECKIN' | 'SHOPPING_CHECKIN'
+      ? number | null
+      : number;
+  };
+}[SyncCommandType];
 
 interface SyncOperationBase {
   /** 客户端生成的幂等操作 ID。 */
@@ -32,14 +52,12 @@ export type SyncOperation =
       /** 删除唯一证据；服务端与端侧都以该值判定删除（与本地软删时间一致）。 */
       readonly deletedAt: string;
     })
-  | (SyncOperationBase & {
-      readonly kind: 'command';
-      readonly entity: 'Ingredient';
-      readonly commandType: SyncCommandType;
-      readonly baseVersion: number;
-      readonly payload: SyncPayload;
-      readonly payloadHash: string;
-    });
+  | (SyncOperationBase &
+      SyncCommandTarget & {
+        readonly kind: 'command';
+        readonly payload: SyncPayload;
+        readonly payloadHash: string;
+      });
 
 export interface SyncPushRequest {
   readonly deviceId: string;

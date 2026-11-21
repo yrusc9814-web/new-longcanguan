@@ -3,6 +3,7 @@ import type { MealType, QuantityUnit } from './domain.js';
 export interface DashboardRecipe {
   id: string;
   name: string;
+  category: string | null;
   imagePath: string | null;
   cookingTimeMinutes: number | null;
   tags: string[];

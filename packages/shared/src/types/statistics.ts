@@ -25,6 +25,11 @@ export interface StatisticsCostSummary {
   recordCount: number;
   takeoutRecordCount: number;
   dineInRecordCount: number;
+  takeoutPricedCount: number;
+  dineInPricedCount: number;
+  takeoutPricedRecordCount: number;
+  dineInPricedRecordCount: number;
+  homemadePricedRecordCount: number;
   homemadeRecordCount: number;
   customRecordCount: number;
 }

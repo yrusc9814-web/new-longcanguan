@@ -56,7 +56,7 @@ public final class UploadsGate {
         if (state.lockedPendingWipe()) {
             return UploadsDecision.forbidden();
         }
-        if (state.pinRequired() && !state.pinUnlocked()) {
+        if ((state.pinRequired() && !state.pinUnlocked()) || new UploadsRestore(uploadsRoot).isReplacing()) {
             return UploadsDecision.unauthorized();
         }
 

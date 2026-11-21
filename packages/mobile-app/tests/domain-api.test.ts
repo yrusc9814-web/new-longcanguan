@@ -86,15 +86,15 @@ async function failInsert(table: string) {
   );
 }
 
-it('从生产入口挂载 26 条保留路由，cook-checkin 和 30 条剔除路由不在注册表中', () => {
-  const domains = new Set(['recipe', 'store', 'diner', 'ingredient', 'kitchen', 'tool']);
-  const routes = RETAINED_ENDPOINTS.filter(
-    (entry) => domains.has(entry.domain) && !entry.path.endsWith('/cook-checkin'),
-  );
-  expect(routes).toHaveLength(26);
-  for (const { method, path } of routes)
+it('从生产入口注册 61 条保留路由并且无未实现占位，退役端点未注册', async () => {
+  expect(RETAINED_ENDPOINTS).toHaveLength(61);
+  for (const { method, path } of RETAINED_ENDPOINTS) {
     expect(router.has(method, path), `${method} ${path}`).toBe(true);
-  expect(router.has('POST', '/api/v1/recipes/:id/cook-checkin')).toBe(false);
+    const response = await router.handle(
+      new Request(`http://localhost${path.replace(':id', 'absent')}`, { method }),
+    );
+    expect(response.status, `${method} ${path}`).not.toBe(501);
+  }
   for (const { method, path } of RETIRED_ENDPOINTS)
     expect(router.has(method, path), `${method} ${path}`).toBe(false);
 });

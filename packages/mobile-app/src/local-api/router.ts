@@ -30,6 +30,8 @@ export const PIN_EXEMPT_ENDPOINTS: ReadonlySet<string> = new Set([
   'GET /api/v1/settings',
   'GET /api/v1/settings/pin/session',
   'POST /api/v1/settings/pin/verify',
+  'POST /api/v1/settings/high-risk/authorize',
+  'POST /api/v1/backups/restore',
 ]);
 
 export interface LocalApiGateState {

@@ -45,6 +45,15 @@ public class GateStoreTest {
     }
 
     @Test
+    public void expiredPinSessionLocksNativeReads() throws Exception {
+        GateStore store = new GateStore(persistence());
+        assertTrue(store.update(null, true, true, Long.MAX_VALUE).pinUnlocked());
+        store.update(null, true, true, 1L);
+        assertTrue(store.get().pinRequired());
+        assertFalse(store.get().pinUnlocked());
+    }
+
+    @Test
     public void pendingWipeSurvivesReloadAndLocksGate() throws Exception {
         FileGatePersistence persistence = persistence();
         GateStore store = new GateStore(persistence);

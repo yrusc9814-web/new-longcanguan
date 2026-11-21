@@ -37,6 +37,7 @@ public class MainActivity extends BridgeActivity {
         // Must happen before BridgeActivity.onCreate() builds the Bridge, otherwise the JS side
         // would see an "AppSecurity not implemented" plugin.
         registerPlugin(AppSecurityPlugin.class);
+        registerPlugin(UploadsFilesPlugin.class);
         super.onCreate(savedInstanceState);
     }
 

@@ -32,12 +32,17 @@ public final class SecurityGateService {
      * @param pinRequired {@code null} keeps the current value
      * @param pinUnlocked {@code null} keeps the current value
      */
-    public synchronized GateState setGateState(Boolean lockedPendingWipe, Boolean pinRequired, Boolean pinUnlocked)
+    public GateState setGateState(Boolean lockedPendingWipe, Boolean pinRequired, Boolean pinUnlocked)
+        throws SecurityPersistenceException {
+        return setGateState(lockedPendingWipe, pinRequired, pinUnlocked, null);
+    }
+
+    public synchronized GateState setGateState(Boolean lockedPendingWipe, Boolean pinRequired, Boolean pinUnlocked, Long pinExpiresAt)
         throws SecurityPersistenceException {
         if (Boolean.FALSE.equals(lockedPendingWipe) && gateStore.get().lockedPendingWipe()) {
             tokenStore.clear();
         }
-        GateState next = gateStore.update(lockedPendingWipe, pinRequired, pinUnlocked);
+        GateState next = gateStore.update(lockedPendingWipe, pinRequired, pinUnlocked, pinExpiresAt);
         if (next.lockedPendingWipe() && Boolean.TRUE.equals(lockedPendingWipe)) {
             tokenStore.clear();
         }

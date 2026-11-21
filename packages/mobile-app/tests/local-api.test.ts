@@ -479,7 +479,7 @@ describe('PIN 守卫', () => {
     expect(excluded.code).toBe('UNAUTHORIZED');
   });
 
-  it('仅 4 个免锁端点跳过 PIN，PUT /settings/pin 仍需 token', async () => {
+  it('恢复授权和恢复可在 PIN 已锁定时进入业务验证，PUT /settings/pin 仍需 token', async () => {
     const register = (router: LocalApiRouter) => {
       router.register('GET', '/api/v1/settings', () => ({ pinEnabled: true }));
       router.register('GET', '/api/v1/settings/pin/session', () => ({ required: true }));

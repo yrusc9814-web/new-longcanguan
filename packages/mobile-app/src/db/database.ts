@@ -1,4 +1,9 @@
-import type { SyncCommandType, SyncEntityName } from '@dafan/shared/sync';
+import {
+  SYNC_COMMAND_ENTITIES,
+  type SyncCommandTarget,
+  type SyncCommandType,
+  type SyncEntityName,
+} from '@dafan/shared/sync';
 
 import { LocalApiError } from '../local-api/protocol';
 import {
@@ -41,13 +46,11 @@ export type OutboxOperationInput =
       /** 删除唯一证据：与本地软删写入的 `deletedAt` 必须是同一字符串。 */
       readonly payload: { readonly deletedAt: string };
     })
-  | (OutboxInputBase & {
-      readonly kind: 'command';
-      readonly entity: 'Ingredient';
-      readonly commandType: SyncCommandType;
-      readonly baseVersion: number;
-      readonly payload: Record<string, unknown>;
-    });
+  | (OutboxInputBase &
+      SyncCommandTarget & {
+        readonly kind: 'command';
+        readonly payload: Record<string, unknown>;
+      });
 
 interface OutboxRow {
   opId: string;
@@ -281,6 +284,17 @@ class WriteTransactionImpl implements WriteTransaction {
         throw new DatabaseError('INVALID_STATE', 'delete 操作必须携带 deletedAt', 422);
       }
       payload = { deletedAt };
+    }
+    if (operation.kind === 'command') {
+      if (SYNC_COMMAND_ENTITIES[operation.commandType] !== operation.entity) {
+        throw new DatabaseError('INVALID_STATE', '同步命令与业务实体不匹配', 422);
+      }
+      if (operation.entity !== 'Ingredient') {
+        const executedAt = operation.payload.executedAt;
+        if (typeof executedAt !== 'string' || !Number.isFinite(Date.parse(executedAt))) {
+          throw new DatabaseError('INVALID_STATE', '同步命令必须携带业务执行时间', 422);
+        }
+      }
     }
     const [state] = await this.query<{ epoch: number }>(
       `SELECT "epoch" FROM "${SYNC_STATE_TABLE}" WHERE "id" = 1`,

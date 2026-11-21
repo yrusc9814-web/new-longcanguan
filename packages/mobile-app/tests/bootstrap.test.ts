@@ -1,7 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest';
 
 const { openDatabase, query } = vi.hoisted(() => {
-  const query = vi.fn(async () => [{ ready: 1 }]);
+  const query = vi.fn(async (sql: string) =>
+    sql.includes('device_local_config') ? [{ pinEnabled: 0 }] : [{ id: 1, ready: 1 }],
+  );
   return { query, openDatabase: vi.fn(async () => ({ query })) };
 });
 
@@ -10,6 +12,7 @@ vi.mock('@capacitor-community/sqlite', () => ({ CapacitorSQLite: {} }));
 vi.mock('@capacitor/core', () => ({
   Capacitor: { getPlatform: () => 'android' },
   registerPlugin: () => ({
+    recoverRestore: async () => undefined,
     getGateState: async () => ({
       lockedPendingWipe: false,
       pinRequired: false,

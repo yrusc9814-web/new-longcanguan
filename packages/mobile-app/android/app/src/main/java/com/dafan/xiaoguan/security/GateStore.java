@@ -24,6 +24,7 @@ public final class GateStore {
     private GateState state;
     private GateState persistedState;
     private boolean needsPersist;
+    private long pinExpiresAt;
 
     public GateStore(Persistence persistence) {
         this.persistence = persistence;
@@ -53,7 +54,15 @@ public final class GateStore {
 
     public GateState get() {
         synchronized (lock) {
+            expireUnlock();
             return state;
+        }
+    }
+
+    private void expireUnlock() {
+        if (state.pinUnlocked() && pinExpiresAt > 0 && System.currentTimeMillis() >= pinExpiresAt) {
+            state = GateState.normalized(state.lockedPendingWipe(), state.pinRequired(), false);
+            pinExpiresAt = 0;
         }
     }
 
@@ -65,32 +74,38 @@ public final class GateStore {
      */
     public GateState update(Boolean lockedPendingWipe, Boolean pinRequired, Boolean pinUnlocked)
         throws SecurityPersistenceException {
+        return update(lockedPendingWipe, pinRequired, pinUnlocked, null);
+    }
+
+    public GateState update(Boolean lockedPendingWipe, Boolean pinRequired, Boolean pinUnlocked, Long expiresAt)
+        throws SecurityPersistenceException {
         synchronized (lock) {
+            expireUnlock();
             GateState next = GateState.normalized(
                 lockedPendingWipe == null ? state.lockedPendingWipe() : lockedPendingWipe.booleanValue(),
                 pinRequired == null ? state.pinRequired() : pinRequired.booleanValue(),
                 pinUnlocked == null ? state.pinUnlocked() : pinUnlocked.booleanValue()
             );
 
-            if (!needsPersist && next.lockedPendingWipe() == state.lockedPendingWipe() && next.pinRequired() == state.pinRequired()) {
-                state = next;
-                return state;
-            }
-
-            try {
-                persistence.write(next);
-            } catch (Exception ex) {
-                if (next.lockedPendingWipe()) {
-                    // Fail closed: keep denying access even though the marker is not durable yet.
-                    state = GateState.normalized(true, state.pinRequired(), false);
-                    needsPersist = true;
+            if (needsPersist || next.lockedPendingWipe() != state.lockedPendingWipe() || next.pinRequired() != state.pinRequired()) {
+                try {
+                    persistence.write(next);
+                } catch (Exception ex) {
+                    if (next.lockedPendingWipe() || next.pinRequired()) {
+                        state = GateState.normalized(state.lockedPendingWipe() || next.lockedPendingWipe(), next.pinRequired(), false);
+                        pinExpiresAt = 0;
+                        needsPersist = true;
+                    }
+                    throw new SecurityPersistenceException("Unable to persist the local security gate", ex);
                 }
-                throw new SecurityPersistenceException("Unable to persist the local security gate", ex);
+                persistedState = next;
+                needsPersist = false;
             }
 
             state = next;
-            persistedState = next;
-            needsPersist = false;
+            if (expiresAt != null) pinExpiresAt = expiresAt;
+            if (!state.pinUnlocked()) pinExpiresAt = 0;
+            expireUnlock();
             return state;
         }
     }
@@ -114,6 +129,7 @@ public final class GateStore {
     public GateState lock() {
         synchronized (lock) {
             state = GateState.normalized(state.lockedPendingWipe(), state.pinRequired(), false);
+            pinExpiresAt = 0;
             return state;
         }
     }
