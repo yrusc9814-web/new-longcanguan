@@ -3,6 +3,7 @@ import { Capacitor } from '@capacitor/core';
 import { openCapacitorDatabase } from '../db/index.js';
 import { appSecurity } from '../native/app-security.js';
 import { createPinSession } from '../native/pin-session.js';
+import { registerDomainRoutes } from './domains.js';
 import { createLocalApiFetch, createLocalApiRouter } from './router.js';
 
 const isAndroid = Capacitor.getPlatform() === 'android';
@@ -36,6 +37,8 @@ export const localApi = createLocalApiRouter({
   },
 });
 
-// Module scripts run before Google2's DOMContentLoaded boot callback.
+registerDomainRoutes(localApi, getDatabase);
+
+// Install the local fetch before the deferred Google2 adapter executes.
 const nativeFetch = globalThis.fetch.bind(globalThis);
 globalThis.fetch = createLocalApiFetch({ router: localApi, nativeFetch });

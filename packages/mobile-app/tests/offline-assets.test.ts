@@ -35,8 +35,10 @@ describe('离线资产迁移完整性', () => {
     const html = read('index.html');
     expect(html).toContain('<title>搭饭小馆</title>');
     expect(html).toContain('src="/assets/tailwind/tailwindcss-3.4.17.browser.min.js"');
-    expect(html).toContain('<script type="module" src="/src/local-api/bootstrap.ts"></script>');
-    expect(html).toContain('src="/google2-adapter.js"');
+    const bootstrap = '<script type="module" src="/src/local-api/bootstrap.ts"></script>';
+    const adapter = '<script src="/google2-adapter.js" defer></script>';
+    expect(html).toContain(bootstrap);
+    expect(html.indexOf(adapter)).toBeGreaterThan(html.indexOf(bootstrap));
     expect(html).toContain('id="appViewport"');
   });
 
@@ -99,6 +101,9 @@ describe('Vite 构建产物', () => {
     const output = built.match(builtEntry)?.[1];
     expect(output).toBeDefined();
     expect(existsSync(resolve(dist, `.${output}`))).toBe(true);
+    expect(built.indexOf('<script src="/google2-adapter.js" defer>')).toBeGreaterThan(
+      built.indexOf(`src="${output}"`),
+    );
     expect(built.replace(builtEntry, '')).toBe(source.replace(sourceEntry, ''));
   });
 

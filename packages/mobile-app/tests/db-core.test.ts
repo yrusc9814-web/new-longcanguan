@@ -59,7 +59,7 @@ describe('只读查询入口', () => {
 });
 
 describe('新库初始化', () => {
-  it('空库一次建起 30 张表和 71 个索引，并写入 user_version=1', async () => {
+  it('空库一次建起 30 张表和 72 个索引，并写入 user_version=2', async () => {
     const handle = await freshMemoryDatabase();
     const tables = await handle.query<{ c: number }>(
       "SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
@@ -69,8 +69,8 @@ describe('新库初始化', () => {
     );
     const version = await handle.query<{ user_version: number }>('PRAGMA user_version');
     expect(tables[0]?.c).toBe(30);
-    expect(indexes[0]?.c).toBe(71);
-    expect(version[0]?.user_version).toBe(1);
+    expect(indexes[0]?.c).toBe(72);
+    expect(version[0]?.user_version).toBe(2);
   });
 
   it('重复打开同一文件库不会重复迁移，也不清空已有数据', async () => {
@@ -398,7 +398,7 @@ describe('发件箱与业务写入同事务', () => {
         entity: 'Recipe',
         entityId: 'r1',
         kind: 'upsert',
-        baseVersion: null,
+        baseVersion: 1,
       });
     });
     await handle.withWriteTransaction(async (tx) => {
@@ -414,6 +414,79 @@ describe('发件箱与业务写入同事务', () => {
       'SELECT "opId","kind" FROM "sync_outbox"',
     );
     expect(rows).toEqual([{ opId: 'op-2', kind: 'delete' }]);
+  });
+
+  it('保留未同步的新建及后续删除，使离线操作能够依序重放', async () => {
+    const handle = await freshMemoryDatabase();
+    await handle.withWriteTransaction(async (tx) => {
+      const entity = { entity: 'KitchenTool', entityId: 't1' } as const;
+      await tx.enqueue({ ...entity, opId: 'create', kind: 'upsert', baseVersion: null });
+      await tx.enqueue({ ...entity, opId: 'delete', kind: 'delete', baseVersion: 1 });
+    });
+    await expect(
+      handle.query('SELECT "opId", "baseVersion" FROM "sync_outbox" ORDER BY rowid'),
+    ).resolves.toEqual([
+      { opId: 'create', baseVersion: null },
+      { opId: 'delete', baseVersion: 1 },
+    ]);
+    await handle.close();
+  });
+
+  it('修改只合并同一实体最近的 pending 写，保留 inflight 和中间命令的顺序', async () => {
+    const handle = await freshMemoryDatabase();
+    await handle.withWriteTransaction(async (tx) => {
+      const queue = (opId: string, baseVersion: number, quantity: number) =>
+        tx.enqueue({
+          opId,
+          entity: 'Ingredient',
+          entityId: 'i1',
+          kind: 'upsert',
+          baseVersion,
+          payload: { quantity },
+        });
+      await queue('inflight', 1, 7);
+      await tx.run(
+        `UPDATE "sync_outbox" SET "state" = 'inflight', "attemptCount" = 1 WHERE "opId" = ?`,
+        ['inflight'],
+      );
+      await queue('before-command', 2, 8);
+      const command = {
+        entity: 'Ingredient',
+        entityId: 'i1',
+        kind: 'command',
+        commandType: 'INGREDIENT_CONSUME',
+        payload: { mode: 'QUANTITY', quantity: 1, unit: 'GRAM' },
+      } as const;
+      await tx.enqueue({ ...command, opId: 'consume-1', baseVersion: 3 });
+      await tx.enqueue({ ...command, opId: 'consume-2', baseVersion: 4 });
+      await tx.enqueue({ ...command, opId: 'consume-2', baseVersion: 4 });
+      await queue('after-command', 5, 9);
+      await queue('after-command-latest', 6, 10);
+    });
+    const rows = await handle.query(
+      `SELECT "opId", "state", "baseVersion", "payloadHash", "attemptCount" FROM "sync_outbox" ORDER BY rowid`,
+    );
+    const hash = expect.stringMatching(/^[0-9a-f]{64}$/);
+    expect(rows).toEqual([
+      { opId: 'inflight', state: 'inflight', baseVersion: 1, payloadHash: hash, attemptCount: 1 },
+      {
+        opId: 'before-command',
+        state: 'pending',
+        baseVersion: 2,
+        payloadHash: hash,
+        attemptCount: 0,
+      },
+      { opId: 'consume-1', state: 'pending', baseVersion: 3, payloadHash: hash, attemptCount: 0 },
+      { opId: 'consume-2', state: 'pending', baseVersion: 4, payloadHash: hash, attemptCount: 0 },
+      {
+        opId: 'after-command-latest',
+        state: 'pending',
+        baseVersion: 5,
+        payloadHash: hash,
+        attemptCount: 0,
+      },
+    ]);
+    await handle.close();
   });
 
   it('业务写入失败时发件箱不留残影', async () => {
@@ -450,6 +523,41 @@ describe('发件箱与业务写入同事务', () => {
 });
 
 describe('乐观锁', () => {
+  it('自动识别没有 deletedAt 字段的 Diner 和 Settings', async () => {
+    const handle = await freshMemoryDatabase();
+    await handle.withWriteTransaction(async (tx) => {
+      await tx.run(`INSERT INTO "Diner" ("id", "name", "updatedAt") VALUES (?, ?, ?)`, [
+        'd1',
+        '甲',
+        NOW,
+      ]);
+      await tx.run(`INSERT INTO "Settings" ("id", "updatedAt") VALUES (1, ?)`, [NOW]);
+      await expect(
+        tx.updateVersioned({
+          table: 'Diner',
+          id: 'd1',
+          expectedVersion: 1,
+          values: { name: '乙' },
+        }),
+      ).resolves.toBe(2);
+      await expect(
+        tx.updateVersioned({
+          table: 'Settings',
+          id: 1,
+          expectedVersion: 1,
+          values: { appName: '本机' },
+        }),
+      ).resolves.toBe(2);
+    });
+    await expect(handle.query('SELECT name, version FROM "Diner"')).resolves.toEqual([
+      { name: '乙', version: 2 },
+    ]);
+    await expect(handle.query('SELECT appName, version FROM "Settings"')).resolves.toEqual([
+      { appName: '本机', version: 2 },
+    ]);
+    await handle.close();
+  });
+
   it('updateVersioned 版本一致时自增并返回新版本', async () => {
     const handle = await freshMemoryDatabase();
     await insertRecipe(handle, 'r1', 'a', 4);

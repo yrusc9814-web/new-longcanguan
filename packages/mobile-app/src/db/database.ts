@@ -1,5 +1,6 @@
-import type { RETAINED_MODELS } from '@dafan/shared/contracts';
+import type { SyncCommandType, SyncEntityName } from '@dafan/shared/sync';
 
+import { LocalApiError } from '../local-api/protocol';
 import {
   DatabaseError,
   TransactionBrokenError,
@@ -10,6 +11,7 @@ import { AsyncMutex } from './mutex';
 import {
   BUSINESS_TABLES,
   DEVICE_LOCAL_CONFIG_TABLE,
+  MIGRATE_V1_TO_V2,
   SCHEMA_DDL,
   SCHEMA_VERSION,
   SYNC_OUTBOX_TABLE,
@@ -18,24 +20,50 @@ import {
 import type { RunResult, SqlDriver, SqlValue } from './types';
 import { isReadStatement } from './types';
 
-export type SyncEntityName = (typeof RETAINED_MODELS)[number];
+export type { SyncEntityName } from '@dafan/shared/sync';
 
 const SYNC_ENTITIES = new Set<string>(BUSINESS_TABLES);
 
-/** 发件箱入参：字段与 shared `SyncOperation` 对齐，并额外携带 payload。 */
-export interface OutboxOperationInput {
+interface OutboxInputBase {
   /** 幂等键；同一操作的多次重试必须复用同一 opId。 */
   readonly opId: string;
   readonly entity: SyncEntityName;
   readonly entityId: string;
-  readonly kind: 'upsert' | 'delete';
   readonly baseVersion: number | null;
   readonly payload?: Record<string, unknown> | null;
 }
 
+export type OutboxOperationInput =
+  | (OutboxInputBase & { readonly kind: 'upsert' | 'delete' })
+  | (OutboxInputBase & {
+      readonly kind: 'command';
+      readonly entity: 'Ingredient';
+      readonly commandType: SyncCommandType;
+      readonly baseVersion: number;
+      readonly payload: Record<string, unknown>;
+    });
+
+interface OutboxRow {
+  seq: number;
+  opId: string;
+  entity: string;
+  entityId: string;
+  kind: OutboxOperationInput['kind'];
+  commandType: SyncCommandType | null;
+  baseVersion: number | null;
+  payloadJson: string | null;
+  epoch: number;
+  state: 'pending' | 'inflight' | 'dead';
+}
+
+async function hashPayload(payloadJson: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payloadJson));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 export interface VersionedUpdateSpec {
   readonly table: SyncEntityName;
-  readonly id: string;
+  readonly id: string | number;
   readonly expectedVersion: number;
   /** 除 version 外的列赋值；值为 undefined 的列会被忽略。 */
   readonly values: Readonly<Record<string, SqlValue | undefined>>;
@@ -156,6 +184,7 @@ class DatabaseImpl implements DatabaseHandle {
           this.failure = new TransactionBrokenError('写事务回滚失败，需重新打开数据库');
           throw this.failure;
         }
+        if (error instanceof LocalApiError) throw error;
         throw asDatabaseError(error);
       } finally {
         tx.finish();
@@ -205,31 +234,64 @@ class WriteTransactionImpl implements WriteTransaction {
     const [state] = await this.query<{ epoch: number }>(
       `SELECT "epoch" FROM "${SYNC_STATE_TABLE}" WHERE "id" = 1`,
     );
+    const epoch = state?.epoch ?? 0;
+    const payloadJson = operation.payload == null ? null : JSON.stringify(operation.payload);
+    const commandType = operation.kind === 'command' ? operation.commandType : null;
+    const [existing] = await this.query<OutboxRow>(
+      `SELECT rowid AS seq, * FROM "${SYNC_OUTBOX_TABLE}" WHERE "opId" = ?`,
+      [operation.opId],
+    );
+    if (existing) {
+      if (
+        existing.entity !== operation.entity ||
+        existing.entityId !== operation.entityId ||
+        existing.epoch !== epoch ||
+        existing.kind !== operation.kind ||
+        existing.commandType !== commandType ||
+        existing.payloadJson !== payloadJson ||
+        (operation.kind === 'command' && existing.baseVersion !== operation.baseVersion)
+      ) {
+        throw new DatabaseError('INVALID_STATE', '发件箱操作 ID 已用于不同写入', 409);
+      }
+      return;
+    }
+
     const timestamp = this.now().toISOString();
+    const payloadHash = payloadJson === null ? null : await hashPayload(payloadJson);
+    if (operation.kind !== 'command') {
+      const [latest] = await this.query<OutboxRow>(
+        `SELECT rowid AS seq, * FROM "${SYNC_OUTBOX_TABLE}"
+         WHERE "entity" = ? AND "entityId" = ? AND "epoch" = ? ORDER BY rowid DESC LIMIT 1`,
+        [operation.entity, operation.entityId, epoch],
+      );
+      // A command must replay after its inputs. A delete must replay after a queued create.
+      const deleteAfterCreate = operation.kind === 'delete' && latest?.baseVersion === null;
+      if (latest?.state === 'pending' && latest.kind !== 'command' && !deleteAfterCreate) {
+        await this.run(
+          `UPDATE "${SYNC_OUTBOX_TABLE}" SET "opId" = ?, "kind" = ?, "payloadJson" = ?,
+            "payloadHash" = ?, "attemptCount" = 0, "lastError" = NULL, "nextAttemptAt" = NULL,
+            "updatedAt" = ? WHERE rowid = ? AND "state" = 'pending' AND "kind" IN ('upsert', 'delete')`,
+          [operation.opId, operation.kind, payloadJson, payloadHash, timestamp, latest.seq],
+        );
+        return;
+      }
+    }
+
     await this.run(
       `INSERT INTO "${SYNC_OUTBOX_TABLE}"
-        ("id", "opId", "entity", "entityId", "kind", "baseVersion", "payloadJson", "epoch", "state", "attemptCount", "lastError", "nextAttemptAt", "createdAt", "updatedAt")
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, ?, ?)
-       ON CONFLICT ("entity", "entityId") DO UPDATE SET
-         "opId" = excluded."opId",
-         "kind" = excluded."kind",
-         "baseVersion" = excluded."baseVersion",
-         "payloadJson" = excluded."payloadJson",
-         "epoch" = excluded."epoch",
-         "state" = 'pending',
-         "attemptCount" = 0,
-         "lastError" = NULL,
-         "nextAttemptAt" = NULL,
-         "updatedAt" = excluded."updatedAt"`,
+        ("id", "opId", "entity", "entityId", "kind", "commandType", "baseVersion", "payloadJson", "payloadHash", "epoch", "createdAt", "updatedAt")
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         operation.opId,
         operation.opId,
         operation.entity,
         operation.entityId,
         operation.kind,
+        commandType,
         operation.baseVersion,
-        operation.payload == null ? null : JSON.stringify(operation.payload),
-        state?.epoch ?? 0,
+        payloadJson,
+        payloadHash,
+        epoch,
         timestamp,
         timestamp,
       ],
@@ -241,11 +303,11 @@ class WriteTransactionImpl implements WriteTransaction {
     if (!SYNC_ENTITIES.has(spec.table)) {
       throw new DatabaseError('INVALID_STATE', '无效的业务表', 422);
     }
-    const activeOnly = spec.activeOnly ?? true;
+    const activeOnly =
+      spec.activeOnly !== false && spec.table !== 'Diner' && spec.table !== 'Settings';
+    const where = `WHERE "id" = ?${activeOnly ? ' AND "deletedAt" IS NULL' : ''}`;
     const rows = await this.query<{ version: number }>(
-      activeOnly
-        ? `SELECT "version" FROM "${spec.table}" WHERE "id" = ? AND "deletedAt" IS NULL`
-        : `SELECT "version" FROM "${spec.table}" WHERE "id" = ?`,
+      `SELECT "version" FROM "${spec.table}" ${where}`,
       [spec.id],
     );
     const current = rows[0];
@@ -253,7 +315,12 @@ class WriteTransactionImpl implements WriteTransaction {
       throw new DatabaseError('NOT_FOUND', `${spec.table} ${spec.id} 不存在`, 404);
     }
     if (current.version !== spec.expectedVersion) {
-      throw new VersionConflictError(spec.table, spec.id, spec.expectedVersion, current.version);
+      throw new VersionConflictError(
+        spec.table,
+        String(spec.id),
+        spec.expectedVersion,
+        current.version,
+      );
     }
     const columns = Object.entries(spec.values).filter(([, value]) => value !== undefined);
     const assignments = columns.map(([column]) => {
@@ -264,7 +331,7 @@ class WriteTransactionImpl implements WriteTransaction {
     });
     assignments.push('"version" = "version" + 1', '"updatedAt" = ?');
     const result = await this.run(
-      `UPDATE "${spec.table}" SET ${assignments.join(', ')} WHERE "id" = ? AND "version" = ?`,
+      `UPDATE "${spec.table}" SET ${assignments.join(', ')} ${where} AND "version" = ?`,
       [
         ...columns.map(([, value]) => value as SqlValue),
         this.now().toISOString(),
@@ -275,7 +342,7 @@ class WriteTransactionImpl implements WriteTransaction {
     if (result.changes !== 1) {
       throw new VersionConflictError(
         spec.table,
-        spec.id,
+        String(spec.id),
         spec.expectedVersion,
         current.version + 1,
       );
@@ -297,6 +364,11 @@ export async function migrate(database: DatabaseClient, now = () => new Date()):
       );
     }
     if (current === SCHEMA_VERSION) return;
+    if (current === 1) {
+      for (const statement of MIGRATE_V1_TO_V2) await tx.exec(statement);
+      await tx.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      return;
+    }
     for (const statement of SCHEMA_DDL) await tx.exec(statement);
 
     const timestamp = now().toISOString();

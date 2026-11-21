@@ -44,7 +44,7 @@ describe('离线库 schema 终态', () => {
       (s) => s.includes('CREATE INDEX') || s.includes('CREATE UNIQUE INDEX'),
     ).length;
     expect(tables).toBe(30);
-    expect(indexes).toBe(71);
+    expect(indexes).toBe(72);
   });
 
   it('WAL 与外键在文件库上生效', async () => {
@@ -62,7 +62,7 @@ describe('离线库 schema 终态', () => {
 
   it('user_version 等于 SCHEMA_VERSION', async () => {
     const rows = await handle.query<{ user_version: number }>('PRAGMA user_version');
-    expect(rows[0]?.user_version).toBe(1);
+    expect(rows[0]?.user_version).toBe(2);
   });
 
   it('deletedAt 覆盖全部软删实体，MealRecord 额外保留 planUncompleteProof', async () => {

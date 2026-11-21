@@ -29,7 +29,9 @@ it('启动即拦截 Google2 的首个同源 API 请求，并在健康探针中�
   const originalFetch = vi.fn(async () => new Response('cloud'));
   vi.stubGlobal('fetch', originalFetch);
   vi.stubGlobal('location', new URL('https://localhost/'));
-  await import('../src/local-api/bootstrap.js');
+  const { localApi } = await import('../src/local-api/bootstrap.js');
+  expect(localApi.has('GET', '/api/v1/recipes')).toBe(true);
+  expect(localApi.has('POST', '/api/v1/kitchen/recommend')).toBe(true);
 
   const health = await fetch('/api/v1/health');
   expect(health.status).toBe(200);

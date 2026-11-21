@@ -24,7 +24,7 @@
 import { RETAINED_MODELS } from '@dafan/shared/contracts';
 
 /** schema 版本，写入 PRAGMA user_version。 */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /** 27 张业务表，与 shared RETAINED_MODELS 一致。 */
 export const BUSINESS_TABLES: readonly string[] = RETAINED_MODELS;
@@ -35,6 +35,26 @@ export const LOCAL_TABLES = ['device_local_config', 'sync_outbox', 'sync_state']
 export const DEVICE_LOCAL_CONFIG_TABLE = 'device_local_config';
 export const SYNC_OUTBOX_TABLE = 'sync_outbox';
 export const SYNC_STATE_TABLE = 'sync_state';
+
+const OUTBOX_DDL = `CREATE TABLE "sync_outbox" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "opId" TEXT NOT NULL,
+    "entity" TEXT NOT NULL,
+    "entityId" TEXT NOT NULL,
+    "kind" TEXT NOT NULL CHECK ("kind" IN ('upsert', 'delete', 'command')),
+    "commandType" TEXT,
+    "baseVersion" INTEGER,
+    "payloadJson" TEXT,
+    "payloadHash" TEXT,
+    "epoch" INTEGER NOT NULL,
+    "state" TEXT NOT NULL DEFAULT 'pending' CHECK ("state" IN ('pending', 'inflight', 'dead')),
+    "attemptCount" INTEGER NOT NULL DEFAULT 0,
+    "lastError" TEXT,
+    "nextAttemptAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "sync_outbox_opId_key" UNIQUE ("opId")
+  )`;
 
 /** 私有端表 DDL：本机配置、发件箱、同步状态。 */
 export const LOCAL_TABLE_DDL: readonly string[] = [
@@ -52,24 +72,7 @@ export const LOCAL_TABLE_DDL: readonly string[] = [
     "bindingGeneration" INTEGER NOT NULL DEFAULT 0,
     "updatedAt" DATETIME NOT NULL
   )`,
-  `CREATE TABLE "sync_outbox" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "opId" TEXT NOT NULL,
-    "entity" TEXT NOT NULL,
-    "entityId" TEXT NOT NULL,
-    "kind" TEXT NOT NULL CHECK ("kind" IN ('upsert', 'delete')),
-    "baseVersion" INTEGER,
-    "payloadJson" TEXT,
-    "epoch" INTEGER NOT NULL,
-    "state" TEXT NOT NULL DEFAULT 'pending' CHECK ("state" IN ('pending', 'inflight', 'dead')),
-    "attemptCount" INTEGER NOT NULL DEFAULT 0,
-    "lastError" TEXT,
-    "nextAttemptAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
-    CONSTRAINT "sync_outbox_opId_key" UNIQUE ("opId"),
-    CONSTRAINT "sync_outbox_entity_entityId_key" UNIQUE ("entity", "entityId")
-  )`,
+  OUTBOX_DDL,
   `CREATE TABLE "sync_state" (
     "id" INTEGER NOT NULL PRIMARY KEY CHECK ("id" = 1),
     "epoch" INTEGER NOT NULL DEFAULT 0,
@@ -81,6 +84,17 @@ export const LOCAL_TABLE_DDL: readonly string[] = [
 /** 私有端表索引。 */
 export const LOCAL_INDEX_DDL: readonly string[] = [
   `CREATE INDEX "sync_outbox_state_createdAt_idx" ON "sync_outbox" ("state", "createdAt")`,
+  `CREATE INDEX "sync_outbox_entity_entityId_idx" ON "sync_outbox" ("entity", "entityId")`,
+];
+
+const V1_OUTBOX_COLUMNS = `"id", "opId", "entity", "entityId", "kind", "baseVersion", "payloadJson", "epoch", "state", "attemptCount", "lastError", "nextAttemptAt", "createdAt", "updatedAt"`;
+
+export const MIGRATE_V1_TO_V2: readonly string[] = [
+  `ALTER TABLE "sync_outbox" RENAME TO "sync_outbox_v1"`,
+  OUTBOX_DDL,
+  `INSERT INTO "sync_outbox" (${V1_OUTBOX_COLUMNS}) SELECT ${V1_OUTBOX_COLUMNS} FROM "sync_outbox_v1" ORDER BY rowid`,
+  `DROP TABLE "sync_outbox_v1"`,
+  ...LOCAL_INDEX_DDL,
 ];
 
 /** 27 张业务表建表语句。 */

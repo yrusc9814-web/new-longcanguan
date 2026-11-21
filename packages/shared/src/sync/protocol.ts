@@ -8,11 +8,15 @@ export type SyncCursor = string;
 export type SyncValue = null | boolean | number | string | readonly SyncValue[] | SyncPayload;
 export type SyncPayload = { readonly [key: string]: SyncValue };
 
+export type SyncCommandType = 'INGREDIENT_CONSUME' | 'INGREDIENT_UPDATE_SYNC_BATCHES';
+
 interface SyncOperationBase {
   /** 客户端生成的幂等操作 ID。 */
   readonly id: string;
   readonly entity: SyncEntityName;
   readonly entityId: string;
+  /** 命令必须提供请求载荷的 SHA-256。旧实体操作可省略。 */
+  readonly payloadHash?: string;
 }
 
 export type SyncOperation =
@@ -25,6 +29,14 @@ export type SyncOperation =
   | (SyncOperationBase & {
       readonly kind: 'delete';
       readonly baseVersion: number;
+    })
+  | (SyncOperationBase & {
+      readonly kind: 'command';
+      readonly entity: 'Ingredient';
+      readonly commandType: SyncCommandType;
+      readonly baseVersion: number;
+      readonly payload: SyncPayload;
+      readonly payloadHash: string;
     });
 
 export interface SyncPushRequest {
