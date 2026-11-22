@@ -114,6 +114,25 @@ public class LocalDataPurgeTest {
     }
 
     @Test
+    public void clearsOnlyWebViewProfileAndCacheOnColdStart() throws IOException {
+        File data = folder.newFolder("app-data");
+        File cache = new File(data, "cache");
+        File local = new File(data, "app_webview/Default/Local Storage/leveldb/000003.log");
+        File session = new File(data, "app_webview/Default/Session Storage/000003.log");
+        File cached = new File(cache, "WebView/Default/cache-entry");
+        File gate = new File(data, "no_backup/security/gate-state.txt");
+        File unrelated = new File(cache, "unrelated");
+        for (File file : new File[] { local, session, cached, gate, unrelated }) write(file, "test");
+
+        assertTrue(LocalDataPurge.purgeWebViewProfile(data, cache));
+        assertFalse(new File(data, "app_webview").exists());
+        assertFalse(new File(cache, "WebView").exists());
+        assertTrue(gate.isFile());
+        assertTrue(unrelated.isFile());
+        assertTrue(LocalDataPurge.purgeWebViewProfile(data, cache));
+    }
+
+    @Test
     public void completenessRequiresEveryTargetToBeAbsent() {
         // The report is the only signal the JS side trusts before unlocking the gate.
         assertTrue(new LocalDataPurge.PurgeReport(true, true, true, java.util.Collections.emptyList()).complete());

@@ -23,6 +23,7 @@ public final class SecurityRuntime {
     private final SecurityGateService gateService;
     private final File uploadsDirectory;
     private final LocalDataPurge localDataPurge;
+    private volatile boolean pendingWipeProfilePurged;
 
     private SecurityRuntime(Context context) {
         Context app = context.getApplicationContext();
@@ -73,6 +74,22 @@ public final class SecurityRuntime {
 
     public File uploadsDirectory() {
         return uploadsDirectory;
+    }
+
+    /** Called once per process before the first WebView is created. */
+    public void preparePendingWipeProfile(Context context) {
+        if (gateStore.get().lockedPendingWipe()) {
+            pendingWipeProfilePurged = LocalDataPurge.purgeWebViewProfile(
+                context.getFilesDir().getParentFile(), context.getCacheDir());
+        }
+    }
+
+    public boolean pendingWipeProfilePurged() {
+        return pendingWipeProfilePurged;
+    }
+
+    void finishPendingWipe() {
+        pendingWipeProfilePurged = false;
     }
 
     /** Fixed-root physical erasure service; no caller-supplied paths. */

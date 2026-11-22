@@ -30,10 +30,17 @@ import org.json.JSONObject;
 
 public class MainActivity extends BridgeActivity {
 
+    private static boolean webViewStarted;
     private SecurityRuntime securityRuntime;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // The profile can only be removed before the first WebView in this process opens it.
+        SecurityRuntime runtime = SecurityRuntime.install(this);
+        if (!webViewStarted) {
+            runtime.preparePendingWipeProfile(this);
+            webViewStarted = true;
+        }
         // Must happen before BridgeActivity.onCreate() builds the Bridge, otherwise the JS side
         // would see an "AppSecurity not implemented" plugin.
         registerPlugin(AppSecurityPlugin.class);

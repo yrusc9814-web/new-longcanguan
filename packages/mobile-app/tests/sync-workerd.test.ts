@@ -35,6 +35,7 @@ async function makeDevice(name: string) {
   const events: { name: string; detail: unknown }[] = [];
   const requests: { path: string; status: number }[] = [];
   const backups: Uint8Array[] = [];
+  const revocations: { memberId: string; source: string }[] = [];
   const socketFrames: string[] = [];
   const actualSockets: WebSocket[] = [];
   const { port } = new URL((await runtime.mf.ready).href);
@@ -52,6 +53,9 @@ async function makeDevice(name: string) {
     files,
     fetch: fetchCloud,
     events: (type, detail) => events.push({ name: type, detail }),
+    onRevoked: ({ memberId, source }) => {
+      revocations.push({ memberId, source });
+    },
     deviceId: () => name,
     snapshotPageSize: 1,
     safetyBackupStore: {
@@ -117,6 +121,7 @@ async function makeDevice(name: string) {
     requests,
     token,
     backups,
+    revocations,
     socketFrames,
     actualSockets,
     intercept(callback: typeof intercept) {
@@ -515,7 +520,16 @@ describe('mobile SQLite and HouseholdHub on Miniflare', () => {
     const banned = await addDevice('removed');
     const binding = await banned.bindMember(await owner.token());
     const bannedToken = await banned.token();
+    banned.engine.start();
+    await banned.readySocket();
     expect((await revoke(runtime, await owner.token(), binding.binding.memberId)).status).toBe(204);
+    await expect
+      .poll(() => banned.revocations)
+      .toContainEqual({
+        memberId: binding.binding.memberId,
+        source: 'websocket',
+      });
+    expect(banned.engine.active).toBe(false);
     const refused = await runtime.dispatchFetch(`${ORIGIN}/api/sync/epoch-reset`, {
       method: 'POST',
       headers: { authorization: `Bearer ${await member.token()}`, 'x-household-epoch': '1' },

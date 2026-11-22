@@ -58,7 +58,15 @@ public final class AppSecurityPlugin extends Plugin {
         Long pinExpiresAt = expiry == null ? null : ((Number) expiry).longValue();
 
         try {
-            call.resolve(toJs(service().setGateState(lockedPendingWipe, pinRequired, pinUnlocked, pinExpiresAt)));
+            SecurityRuntime runtime = SecurityRuntime.get(getContext());
+            if (Boolean.FALSE.equals(lockedPendingWipe) && runtime.gateStore().get().lockedPendingWipe()
+                && !runtime.pendingWipeProfilePurged()) {
+                call.reject("Restart required to clear the WebView profile", "WIPE_RESTART_REQUIRED");
+                return;
+            }
+            GateState state = runtime.gateService().setGateState(lockedPendingWipe, pinRequired, pinUnlocked, pinExpiresAt);
+            if (!state.lockedPendingWipe()) runtime.finishPendingWipe();
+            call.resolve(toJs(state));
         } catch (SecurityPersistenceException ex) {
             call.reject("Unable to apply the local security gate", "GATE_UPDATE_FAILED");
         }

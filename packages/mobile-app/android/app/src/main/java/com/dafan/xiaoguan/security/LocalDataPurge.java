@@ -74,15 +74,18 @@ public final class LocalDataPurge {
         deleteTree(new File(filesDirectory, UPLOADS_RESTORE));
     }
 
-    /**
-     * Deletes a file or directory tree.
-     *
-     * <p>Symlinks are never followed: {@code listFiles()} on a directory is safe, and any child that
-     * is itself a link is removed with {@code delete()} rather than traversed.</p>
-     */
+    /** Clears Chromium's private profile before Android instantiates a WebView. */
+    public static boolean purgeWebViewProfile(File dataDirectory, File cacheDirectory) {
+        File profile = new File(dataDirectory, "app_webview");
+        File cache = new File(cacheDirectory, "WebView");
+        deleteTree(profile);
+        deleteTree(cache);
+        return !profile.exists() && !cache.exists();
+    }
+
     private static void deleteTree(File entry) {
         if (entry == null || !entry.exists()) return;
-        File[] children = entry.listFiles();
+        File[] children = isSymlink(entry) ? null : entry.listFiles();
         if (children != null) {
             for (File child : children) {
                 if (child.isDirectory() && !isSymlink(child)) deleteTree(child);
