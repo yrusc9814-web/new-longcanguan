@@ -2,7 +2,7 @@
  * `HouseholdHub` 权威库 schema 迁移器。
  *
  * 结构 = 27 张端云同源业务表与索引（`@dafan/shared/contracts` 逐字共享）
- * + 6 张云端控制表（单家庭单例、成员、邀请、同步日志、幂等操作、图片对象）。
+ * + 云端控制表（家庭、成员、邀请、票据、认证限流、同步日志、幂等操作、图片对象）。
  *
  * 幂等约束：本函数在 DO 每次实例化（`blockConcurrencyWhile`）时执行一次，
  * 所有 DDL 以 `IF NOT EXISTS` 重放；种子数据以 `ON CONFLICT DO NOTHING` 预置，
@@ -41,6 +41,20 @@ const CONTROL_TABLE_DDL: readonly string[] = [
     "used_by_member_id" TEXT,
     "used_at" DATETIME,
     "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE "ws_tickets" (
+    "ticket_hash" TEXT NOT NULL PRIMARY KEY,
+    "member_id" TEXT NOT NULL,
+    "token_hash" TEXT NOT NULL,
+    "expires_at" INTEGER NOT NULL,
+    "created_at" INTEGER NOT NULL
+  )`,
+  `CREATE TABLE "household_auth_attempts" (
+    "scope" TEXT NOT NULL,
+    "source" TEXT NOT NULL,
+    "failures" INTEGER NOT NULL,
+    "expires_at" INTEGER NOT NULL,
+    PRIMARY KEY ("scope", "source")
   )`,
   `CREATE TABLE "sync_log" (
     "epoch" INTEGER NOT NULL,
@@ -89,6 +103,9 @@ const HOUSEHOLD_SCHEMA_DDL = [
   ...BUSINESS_INDEX_DDL,
   ...CONTROL_TABLE_DDL,
   `CREATE INDEX "sync_log_epoch_sync_seq_idx" ON "sync_log" ("epoch", "sync_seq")`,
+  `CREATE UNIQUE INDEX "household_members_single_owner_idx" ON "household_members" ("role") WHERE "role" = 'OWNER'`,
+  `CREATE INDEX "ws_tickets_expires_at_idx" ON "ws_tickets" ("expires_at")`,
+  `CREATE INDEX "household_auth_attempts_expires_at_idx" ON "household_auth_attempts" ("expires_at")`,
 ];
 
 /**
@@ -107,7 +124,7 @@ function withIfNotExists(ddl: string): string {
 }
 
 /**
- * 幂等建库：27 张业务表 + 全部业务索引 + 6 张控制表 + 控制索引，
+ * 幂等建库：27 张业务表、云端控制表及索引，
  * 并预置 `household_meta(id = 1, epoch = 1, initialized = false)`、
  * `Settings(id = 1, version = 1)`、默认购物清单。
  *

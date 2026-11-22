@@ -276,45 +276,28 @@ describe('gateway forwards /api/sync/* and /api/household/* to HouseholdHub', ()
   });
 });
 
-describe('image route method guard', () => {
-  it.each(['POST', 'DELETE', 'PATCH'])(
-    'rejects %s on /api/sync/images/:sha256 without reading the body',
-    async (method) => {
-      const harness = createHarness();
-      const request = new Request('https://cloud.dafan.test/api/sync/images/abc?variant=thumb', {
-        method,
-        headers: { 'x-household-token': 'token-1', 'content-type': 'image/webp' },
-        body: streamingBody([new Uint8Array([1, 2, 3])]),
-        duplex: 'half',
-      } as RequestInit);
+describe('image and WebSocket routes', () => {
+  it.each([
+    ['PUT', '/api/sync/images/abc?variant=thumb'],
+    ['PATCH', '/api/sync/images'],
+  ])('leaves %s %s for the household to handle', async (method, path) => {
+    const harness = createHarness();
+    const { request } = bodyRequest(`https://cloud.dafan.test${path}`, method, {});
 
-      const res = await worker.fetch(request, harness.env);
+    expect(await worker.fetch(request, harness.env)).toBe(harness.response);
+    expect(harness.forwarded[0]).toBe(request);
+    await expectUntouchedBody(request);
+  });
 
-      expect(res.status).toBe(405);
-      expect(res.headers.get('allow')).toBe('GET, PUT');
-      expect(request.bodyUsed).toBe(false);
-      expect(harness.names).toEqual([]);
-    },
-  );
+  it('forwards the original WebSocket upgrade and its ticket query', async () => {
+    const harness = createHarness();
+    const request = new Request('https://cloud.dafan.test/api/sync/ws?ticket=fixture', {
+      headers: { upgrade: 'websocket' },
+    });
 
-  it.each(['POST', 'DELETE', 'PATCH'])(
-    'rejects %s on the bare /api/sync/images collection path',
-    async (method) => {
-      const harness = createHarness();
-      const request = new Request('https://cloud.dafan.test/api/sync/images', {
-        method,
-        headers: { 'x-household-token': 'token-1' },
-        body: streamingBody([new Uint8Array([1])]),
-        duplex: 'half',
-      } as RequestInit);
-
-      const res = await worker.fetch(request, harness.env);
-
-      expect(res.status).toBe(405);
-      expect(request.bodyUsed).toBe(false);
-      expect(harness.names).toEqual([]);
-    },
-  );
+    expect(await worker.fetch(request, harness.env)).toBe(harness.response);
+    expect(harness.forwarded[0]).toBe(request);
+  });
 });
 
 describe('outer Worker stays CPU-cheap (static)', () => {
@@ -329,8 +312,7 @@ describe('outer Worker stays CPU-cheap (static)', () => {
     expect(violations, 'index.ts must stay a streaming proxy').toEqual([]);
   });
 
-  // image-proxy.ts 是外层流式通道的一部分，缺失即视为静态约束失守。
-  it('src/image-proxy.ts never parses bodies or hashes image bytes', () => {
+  it('src/image-proxy.ts streams image bytes without buffering or hashing them in JavaScript', () => {
     const outer = stripComments(
       stripDurableObjectClasses(readFileSync(join(SRC_DIR, 'image-proxy.ts'), 'utf8')),
     );

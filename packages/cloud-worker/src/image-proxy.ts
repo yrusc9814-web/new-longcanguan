@@ -12,7 +12,7 @@ export async function proxyImage(
   request: Request,
   url: URL,
   assetSha256: string,
-  hub: DurableObjectStub<HouseholdHub>,
+  hub: Pick<HouseholdHub, 'readImage' | 'preflightImage' | 'commitImage'>,
   bucket: R2Bucket,
 ): Promise<Response> {
   const target: ImageTarget = { assetSha256, variant: url.searchParams.get('variant') };
@@ -22,6 +22,11 @@ export async function proxyImage(
     const lookup = await hub.readImage(authorization, target);
     if ('code' in lookup) return cloudError(lookup);
     const object = await bucket.get(lookup.objectKey);
+    const current = await hub.readImage(authorization, target);
+    if ('code' in current || current.objectKey !== lookup.objectKey) {
+      await object?.body.cancel().catch(() => undefined);
+      return cloudError('code' in current ? current : NOT_FOUND);
+    }
     if (!object) return cloudError(NOT_FOUND);
 
     const headers = new Headers({

@@ -7,8 +7,11 @@ const testPrefix = '/__test/';
 
 // This entry is bundled only by Miniflare. The production Worker has no seed or inspection routes.
 export class HouseholdHub extends ProductionHouseholdHub {
+  /** 每个真实 DO 实例一个随机值：用于证明 hibernate 驱逐后确实重建了实例。 */
+  readonly instanceId: string = crypto.randomUUID();
+
   override async fetch(request?: Request): Promise<Response> {
-    if (!request) return super.fetch();
+    if (!request) return super.fetch(new Request('https://test.invalid/__test/missing'));
     const { pathname, searchParams } = new URL(request.url);
     const storage = this.ctx.storage;
     const sql = storage.sql;
@@ -29,10 +32,65 @@ export class HouseholdHub extends ProductionHouseholdHub {
           household: sql
             .exec('SELECT id, household_id, epoch, initialized FROM household_meta')
             .one(),
+          instanceId: this.instanceId,
           settings: sql.exec('SELECT id, version FROM "Settings" WHERE id = 1').one(),
           shopping: sql.exec('SELECT id, name, status, version FROM "ShoppingList"').toArray(),
+          syncLog: sql.exec('SELECT * FROM sync_log ORDER BY epoch, sync_seq').toArray(),
           images: sql.exec('SELECT * FROM image_objects ORDER BY variant').toArray(),
+          members: sql
+            .exec(
+              `SELECT id, nickname, role, status, revoked_at, token_hash
+                 FROM household_members ORDER BY created_at, id`,
+            )
+            .toArray(),
+          invites: sql
+            .exec(
+              'SELECT code_hash, created_by, expires_at, used_by_member_id FROM household_invites',
+            )
+            .toArray(),
+          tickets: sql
+            .exec(
+              'SELECT ticket_hash, member_id, token_hash, created_at, expires_at FROM ws_tickets',
+            )
+            .toArray(),
+          attempts: sql
+            .exec('SELECT scope, source, failures, expires_at FROM household_auth_attempts')
+            .toArray(),
+          sockets: this.ctx
+            .getWebSockets()
+            .map((socket) => socket.deserializeAttachment() as Record<string, unknown> | null),
+          // 只暴露计数摘要，不倾倒业务行；验收报告的数据库结论由此得出。
+          counts: {
+            members: sql.exec('SELECT COUNT(*) AS n FROM household_members').one().n,
+            activeMembers: sql
+              .exec(`SELECT COUNT(*) AS n FROM household_members WHERE status = 'ACTIVE'`)
+              .one().n,
+            invites: sql.exec('SELECT COUNT(*) AS n FROM household_invites').one().n,
+            tickets: sql.exec('SELECT COUNT(*) AS n FROM ws_tickets').one().n,
+            attempts: sql.exec('SELECT COUNT(*) AS n FROM household_auth_attempts').one().n,
+            syncLog: sql.exec('SELECT COUNT(*) AS n FROM sync_log').one().n,
+            images: sql.exec('SELECT COUNT(*) AS n FROM image_objects').one().n,
+          },
         });
+      case '/__test/close-sockets': {
+        // Direct close with an arbitrary code: used to prove the client never
+        // receives a revocation frame on non-revocation disconnects.
+        const code = Number(searchParams.get('code') ?? 4001);
+        for (const socket of this.ctx.getWebSockets()) {
+          socket.close(code, searchParams.get('reason') ?? 'TEST');
+        }
+        return new Response(null, { status: 204 });
+      }
+      case '/__test/send-frame': {
+        // Delivers a literal frame over every active socket without changing auth state.
+        const frame = searchParams.get('frame') ?? '{}';
+        let delivered = 0;
+        for (const socket of this.ctx.getWebSockets()) {
+          socket.send(frame);
+          delivered += 1;
+        }
+        return Response.json({ delivered });
+      }
       case '/__test/seed': {
         const { id, tokenHash, role, status } = await request.json<{
           id: string;
@@ -58,9 +116,14 @@ export class HouseholdHub extends ProductionHouseholdHub {
           await hashBearer(request.headers.get('authorization')),
           'OWNER',
         );
-        return 'code' in member
-          ? Response.json({ code: member.code }, { status: member.status })
-          : new Response(null, { status: 204 });
+        if ('code' in member) {
+          const body =
+            member.code === 'MEMBER_REVOKED'
+              ? { code: member.code, householdId: member.householdId, memberId: member.memberId }
+              : { code: member.code };
+          return Response.json(body, { status: member.status });
+        }
+        return new Response(null, { status: 204 });
       }
       case '/__test/migrate':
         sql.exec('UPDATE "Settings" SET "version" = 5');
@@ -70,9 +133,62 @@ export class HouseholdHub extends ProductionHouseholdHub {
       case '/__test/reset-epoch':
         sql.exec('UPDATE household_meta SET epoch = 1');
         return new Response(null, { status: 204 });
+      case '/__test/bump-epoch':
+        sql.exec('UPDATE household_meta SET epoch = epoch + 1');
+        return new Response(null, { status: 204 });
+      case '/__test/reset-auth-attempts':
+        sql.exec('DELETE FROM household_auth_attempts');
+        return new Response(null, { status: 204 });
+      case '/__test/expire-tickets':
+        // 把票据的过期时间推到过去，模拟 30 秒 TTL 到期（不删除行，仍可验证拒绝路径）。
+        sql.exec('UPDATE ws_tickets SET expires_at = ?', Date.now() - 1);
+        return new Response(null, { status: 204 });
+      case '/__test/seed-sync-log': {
+        // 用一行同步日志代表“既有业务数据”，用于恢复/撤权不丢数据的断言。
+        sql.exec(
+          `INSERT INTO sync_log
+             (epoch, sync_seq, entity, entity_id, kind, version, payload_json, actor_member_id, operation_id)
+           VALUES (1, 1, 'Ingredient', 'ingredient-1', 'upsert', 2, '{"id":"ingredient-1"}', 'member', 'op-1')`,
+        );
+        return new Response(null, { status: 204 });
+      }
+      case '/__test/revoke-without-notifying': {
+        const memberId = searchParams.get('memberId');
+        sql.exec("UPDATE household_members SET status = 'REVOKED' WHERE id = ?", memberId);
+        return new Response(null, { status: 204 });
+      }
+      case '/__test/clear-images':
+        sql.exec('DELETE FROM image_objects');
+        return new Response(null, { status: 204 });
+      case '/__test/reset-household':
+        // Full reset for test isolation: drop the household bootstrap state so
+        // init/join flows can be exercised repeatedly inside one harness.
+        sql.exec('DELETE FROM ws_tickets');
+        sql.exec('DELETE FROM household_auth_attempts');
+        sql.exec('DELETE FROM household_invites');
+        sql.exec('DELETE FROM household_members');
+        sql.exec(
+          `UPDATE household_meta
+             SET epoch = 1, initialized = 0, household_id = 'default', updated_at = CURRENT_TIMESTAMP
+           WHERE id = 1`,
+        );
+        for (const socket of this.ctx.getWebSockets()) socket.close(4001, 'TEST_RESET');
+        return new Response(null, { status: 204 });
       case '/__test/arm':
         await storage.put(`image-hook:${searchParams.get('digest')}`, searchParams.get('action'));
         return new Response(null, { status: 204 });
+      case '/__test/hold-commit': {
+        // 让下一次 commitImage 停在 R2 写入之后、DO 登记之前，给另一条真实请求
+        // （馆主撤权）留出自然的并发窗口。
+        await storage.put('commit-gate', 'held');
+        return new Response(null, { status: 204 });
+      }
+      case '/__test/release-commit': {
+        await storage.put('commit-gate', 'released');
+        return new Response(null, { status: 204 });
+      }
+      case '/__test/gate-state':
+        return Response.json({ state: (await storage.get<string>('commit-gate')) ?? null });
       case '/api/sync/__test_echo':
       case '/api/household/__test_echo':
         return new Response(request.body, {
@@ -83,7 +199,7 @@ export class HouseholdHub extends ProductionHouseholdHub {
           },
         });
       default:
-        return super.fetch();
+        return super.fetch(request);
     }
   }
 
@@ -117,6 +233,14 @@ export class HouseholdHub extends ProductionHouseholdHub {
         }
       }
     }
+    if ((await storage.get<string>('commit-gate')) === 'held') {
+      // 只拦第一次提交：读到就改成 waiting，后续提交（例如馆主并发上传）直接放行。
+      await storage.put('commit-gate', 'waiting');
+      for (let attempt = 0; attempt < 600; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        if ((await storage.get<string>('commit-gate')) === 'released') break;
+      }
+    }
     return super.commitImage(authorization, image);
   }
 }
@@ -132,8 +256,19 @@ export default {
     const fakeLength = request.headers.get('x-test-content-length');
     if (fakeLength && request.body) {
       const headers = new Headers(request.headers);
-      if (fakeLength === 'missing') headers.delete('content-length');
-      else headers.set('content-length', fakeLength);
+      headers.delete('x-test-content-length');
+      if (fakeLength === 'missing') {
+        headers.delete('content-length');
+        // workerd 会为已知长度的 body 重新补回 Content-Length；套一层透传流把它变成
+        // 未知长度（等价于真实客户端的 chunked 上传），才能验证“缺头部即拒绝”。
+        request = new Request(request.url, {
+          method: request.method,
+          body: request.body.pipeThrough(new TransformStream()),
+          headers,
+        });
+        return worker.fetch(request, env);
+      }
+      headers.set('content-length', fakeLength);
       request = new Request(request.url, { method: request.method, body: request.body, headers });
     }
     return worker.fetch(request, env);

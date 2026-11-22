@@ -72,6 +72,16 @@ export interface WorkerdWorkerConfig {
   r2Binding: string;
 }
 
+export interface StartWorkerdOptions {
+  /**
+   * 额外的 Worker 绑定（等同于 wrangler 的 `[vars]` / `wrangler secret`）。
+   * 用于把 `OWNER_BOOTSTRAP_SECRET` 这类部署期密钥注入真实 workerd。
+   */
+  bindings?: Record<string, string>;
+  /** 显式指定 Durable Object 实例名，默认 `default`（与生产单例一致）。 */
+  durableObjectName?: string;
+}
+
 export interface WorkerdHarness {
   /** 真实的 Miniflare 实例，保留给需要直接访问设施的测试。 */
   readonly mf: Miniflare;
@@ -87,10 +97,22 @@ export interface WorkerdHarness {
   readonly persistPath: string;
   /** 与 `wrangler.toml` 对齐的绑定信息。 */
   readonly config: WorkerdWorkerConfig;
+  /** 单例 Durable Object 名（默认 `default`）。 */
+  readonly durableObjectName: string;
   /** 取 Durable Object namespace（底层为真实 workerd）。 */
   getDurableObjectNamespace(): Promise<DurableObjectNamespace>;
   /** 取 R2 bucket（底层为真实 workerd）。 */
   getR2Bucket(): Promise<R2Bucket>;
+  /**
+   * 强制按 Cloudflare 的 hibernate 语义驱逐当前 DO 实例。
+   *
+   * 这不是“模拟”：它由 Miniflare 的 dev control 通道直接作用于运行中的
+   * workerd 隔离区，实例内字段丢失、下一次请求重建对象，而 WebSocket 与其
+   * `serializeAttachment` 载荷继续存活。用于验证 Hibernation API 的恢复路径。
+   */
+  evictDurableObject(): Promise<void>;
+  /** 建一个指向单例 DO 的 stub（用于断言活跃 socket 数量等内部状态）。 */
+  getStub(): Promise<DurableObjectStub>;
   /** 停止 workerd 并删除临时目录；可重复调用。 */
   dispose(): Promise<void>;
 }
@@ -261,7 +283,10 @@ export async function readWorkerConfig(): Promise<WorkerdWorkerConfig> {
  *
  * @param entry 测试入口的 `file:` URL（TS 源码即可，内部用 esbuild 打包）。
  */
-export async function startWorkerd(entry: URL): Promise<WorkerdHarness> {
+export async function startWorkerd(
+  entry: URL,
+  options: StartWorkerdOptions = {},
+): Promise<WorkerdHarness> {
   if (entry.protocol !== 'file:') {
     throw new Error(`startWorkerd: 入口必须是 file: URL，收到 ${entry.protocol}`);
   }
@@ -272,6 +297,7 @@ export async function startWorkerd(entry: URL): Promise<WorkerdHarness> {
   }
 
   const config = await readWorkerConfig();
+  const durableObjectName = options.durableObjectName ?? 'default';
   const workerd = resolveWorkerdBinary();
   if (!workerd) {
     throw new Error(
@@ -339,6 +365,8 @@ export async function startWorkerd(entry: URL): Promise<WorkerdHarness> {
         },
       },
       r2Buckets: [config.r2Binding],
+      // 生产密钥经 wrangler secret 注入；测试用 bindings 走同一条 vars 通道。
+      bindings: { HOUSEHOLD_DO_NAME: durableObjectName, ...(options.bindings ?? {}) },
       // 持久化数据也落在 ASCII 临时目录，dispose 时清理。
       defaultPersistRoot: persistPath,
       logRequests: false,
@@ -374,11 +402,23 @@ export async function startWorkerd(entry: URL): Promise<WorkerdHarness> {
       tempDir,
       persistPath,
       config,
+      durableObjectName,
       getDurableObjectNamespace: () =>
         instance.getDurableObjectNamespace(
           config.durableObjectBinding,
         ) as unknown as Promise<DurableObjectNamespace>,
       getR2Bucket: () => instance.getR2Bucket(config.r2Binding) as unknown as Promise<R2Bucket>,
+      evictDurableObject: () =>
+        instance.unsafeEvictDurableObject('', config.durableObjectClass, {
+          name: durableObjectName,
+          webSockets: 'hibernate',
+        }),
+      getStub: async () => {
+        const namespace = await instance.getDurableObjectNamespace(config.durableObjectBinding);
+        return (namespace as unknown as DurableObjectNamespace).get(
+          (namespace as unknown as DurableObjectNamespace).idFromName(durableObjectName),
+        ) as unknown as DurableObjectStub;
+      },
       dispose,
     };
   } catch (error) {

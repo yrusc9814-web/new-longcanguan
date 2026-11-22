@@ -6,6 +6,7 @@ export type ApiErrorCode =
   | 'EPOCH_MISMATCH'
   | 'NOT_FOUND'
   | 'CONFLICT'
+  | 'RATE_LIMITED'
   | 'DATABASE_ERROR'
   | 'INTERNAL_ERROR'
   | 'VERSION_CONFLICT'

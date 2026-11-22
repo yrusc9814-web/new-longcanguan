@@ -21,6 +21,8 @@ const controlTables = [
   'household_meta',
   'household_members',
   'household_invites',
+  'household_auth_attempts',
+  'ws_tickets',
   'sync_log',
   'executed_operations',
   'image_objects',
@@ -85,6 +87,11 @@ async function expectCode(response: Response, status: number, code: string): Pro
     response.status,
     `${response.status} ${response.statusText}: ${JSON.stringify(body)}`,
   ).toBe(status);
+  if (code === 'MEMBER_REVOKED') {
+    // 撤权失败必须锚定到具体家庭与成员，客户端据此清理本地数据。
+    expect(body).toEqual({ code, householdId: 'default', memberId: expect.any(String) });
+    return;
+  }
   expect(body).toEqual({ code });
 }
 

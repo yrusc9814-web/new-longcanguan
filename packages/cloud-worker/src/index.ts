@@ -1,18 +1,15 @@
 import { HouseholdHub } from './household-hub';
-import { proxyImage } from './image-proxy';
 
 export { HouseholdHub };
 
 export interface Env {
   HOUSEHOLD_HUB: DurableObjectNamespace<HouseholdHub>;
   PRIVATE_BUCKET: R2Bucket;
+  OWNER_BOOTSTRAP_SECRET?: string;
 }
 
 const SERVICE_NAME = 'cloud-worker';
 const HEALTH_PATH = '/api/cloud/health';
-const IMAGES_PATH = '/api/sync/images';
-const IMAGE_METHODS = ['GET', 'PUT'];
-const HUB_METHODS = ['GET', 'POST', 'PUT', 'DELETE'];
 
 function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -41,18 +38,7 @@ export default {
     }
 
     const { pathname } = url;
-    if (pathname === IMAGES_PATH || pathname.startsWith(`${IMAGES_PATH}/`)) {
-      if (!IMAGE_METHODS.includes(request.method)) {
-        return methodNotAllowed(request.method, pathname, IMAGE_METHODS);
-      }
-      const assetSha256 = pathname.slice(IMAGES_PATH.length + 1);
-      return proxyImage(request, url, assetSha256, defaultHub(env), env.PRIVATE_BUCKET);
-    }
-
     if (pathname.startsWith('/api/household/') || pathname.startsWith('/api/sync/')) {
-      if (!HUB_METHODS.includes(request.method)) {
-        return methodNotAllowed(request.method, pathname, HUB_METHODS);
-      }
       return defaultHub(env).fetch(request);
     }
 
