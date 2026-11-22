@@ -121,11 +121,10 @@ it('atomically binds all three identities and preserves their data across recove
     );
     expect(await oldOwnerSocket.waitForClose()).toEqual({ code: 4001, reason: 'UNAUTHORIZED' });
     expect(oldOwnerSocket.frames).toEqual([]);
+    // 馆主换票后旧票据的 token_hash 已失效：精确 401，而不是已踢成员的 403 锚点。
     const oldUpgrade = await rejectedUpgrade(runtime, staleOwnerTicket);
-    expect(await expectFailure(oldUpgrade, 403, 'MEMBER_REVOKED')).toEqual({
-      code: 'MEMBER_REVOKED',
-      householdId: owner.householdId,
-      memberId: owner.memberId,
+    expect(await expectFailure(oldUpgrade, 401, 'UNAUTHORIZED')).toEqual({
+      code: 'UNAUTHORIZED',
     });
 
     const recovered = await snapshot(runtime);
@@ -166,6 +165,9 @@ it('atomically binds all three identities and preserves their data across recove
       householdId: memberA.householdId,
       memberId: memberA.memberId,
     };
+    expect(await expectFailure(await pending, 403, revoked.code)).toEqual(revoked);
+    expect(await bucketKeys(runtime)).toEqual(committedKeys);
+
     expect(await socketA.waitForClose()).toEqual({ code: 4003, reason: 'MEMBER_REVOKED' });
     expect(socketA.frames).toHaveLength(1);
     expect(JSON.parse(socketA.frames[0])).toEqual({
@@ -173,8 +175,6 @@ it('atomically binds all three identities and preserves their data across recove
       householdId: revoked.householdId,
       memberId: revoked.memberId,
     });
-    expect(await expectFailure(await pending, 403, revoked.code)).toEqual(revoked);
-    expect(await bucketKeys(runtime)).toEqual(committedKeys);
 
     const denied = [
       call(runtime, '/api/household/me', { headers: auth(memberA.token) }),

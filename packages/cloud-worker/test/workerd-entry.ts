@@ -4,6 +4,7 @@ import type { PendingImageUpload } from '../src/image-protocol';
 import { migrateHousehold } from '../src/schema';
 
 const testPrefix = '/__test/';
+const IMAGE_FETCH_PATH = '/api/sync/images';
 
 // This entry is bundled only by Miniflare. The production Worker has no seed or inspection routes.
 export class HouseholdHub extends ProductionHouseholdHub {
@@ -12,9 +13,19 @@ export class HouseholdHub extends ProductionHouseholdHub {
 
   override async fetch(request?: Request): Promise<Response> {
     if (!request) return super.fetch(new Request('https://test.invalid/__test/missing'));
-    const { pathname, searchParams } = new URL(request.url);
+    const url = new URL(request.url);
+    const { pathname, searchParams } = url;
     const storage = this.ctx.storage;
     const sql = storage.sql;
+
+    // 图片 GET/PUT 由外层 Worker 自行完成授权与流处理。任何图片请求如果还能走到
+    // 这里，说明外层又把整条请求转给了 DO fetch；返回显式哨兵让测试断言“外层绕过”。
+    if (pathname === IMAGE_FETCH_PATH || pathname.startsWith(`${IMAGE_FETCH_PATH}/`)) {
+      return new Response('DO_IMAGE_FETCH', {
+        status: 418,
+        headers: { 'x-test-image-intercept': `${request.method} ${pathname}${url.search}` },
+      });
+    }
 
     switch (pathname) {
       case '/__test/inspect':

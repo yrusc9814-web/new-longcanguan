@@ -12,7 +12,7 @@ export async function proxyImage(
   request: Request,
   url: URL,
   assetSha256: string,
-  hub: Pick<HouseholdHub, 'readImage' | 'preflightImage' | 'commitImage'>,
+  hub: DurableObjectStub<HouseholdHub>,
   bucket: R2Bucket,
 ): Promise<Response> {
   const target: ImageTarget = { assetSha256, variant: url.searchParams.get('variant') };

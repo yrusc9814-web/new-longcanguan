@@ -27,6 +27,7 @@ import {
   members,
   OTHER_SOURCE,
   readImage,
+  recoverOwner,
   rejectedUpgrade,
   releaseCommit,
   resetHousehold,
@@ -152,6 +153,30 @@ describe('GET /api/sync/ws', () => {
       'VALIDATION_ERROR',
     );
     await expectFailure(await rejectedUpgrade(runtime), 401, 'UNAUTHORIZED');
+  });
+
+  it('separates a rotated owner ticket (401) from a revoked member ticket (403) with exact bodies', async () => {
+    const { owner, member } = await household();
+    const staleOwner = await ticket(runtime, owner.token);
+    const memberTicket = await ticket(runtime, member.token);
+    const rotated = await recoverOwner(runtime, '新馆主');
+
+    // 馆主换票后，旧票据对应的 token_hash 已不在成员表：精确 401，且不带任何锚点。
+    const stale = await rejectedUpgrade(runtime, staleOwner.ticket);
+    expect(await expectFailure(stale, 401, 'UNAUTHORIZED')).toEqual({ code: 'UNAUTHORIZED' });
+
+    // 已踢成员的票据仍能解出成员，但会话撤权：精确 403 锚定 householdId + memberId。
+    expect((await revoke(runtime, rotated.token, member.memberId)).status).toBe(204);
+    const kicked = await rejectedUpgrade(runtime, memberTicket.ticket);
+    expect(await expectFailure(kicked, 403, 'MEMBER_REVOKED')).toEqual({
+      code: 'MEMBER_REVOKED',
+      householdId: member.householdId,
+      memberId: member.memberId,
+    });
+
+    // 新馆主票据不受影响，仍可建立真实连接。
+    const socket = await connect(runtime, (await ticket(runtime, rotated.token)).ticket);
+    socket.close();
   });
 });
 

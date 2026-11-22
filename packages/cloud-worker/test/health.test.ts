@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import worker, { HouseholdHub, type Env } from '../src/index';
 
@@ -18,7 +18,10 @@ interface Harness {
   response: Response;
 }
 
-function createHarness(): Harness {
+function createHarness(
+  rpc: Partial<Pick<HouseholdHub, 'readImage' | 'preflightImage' | 'commitImage'>> = {},
+  bucket: Partial<Pick<R2Bucket, 'get' | 'put' | 'delete'>> = {},
+): Harness {
   const forwarded: Request[] = [];
   const names: string[] = [];
   const response = new Response(JSON.stringify({ ok: true, at: 'stub' }), {
@@ -27,6 +30,7 @@ function createHarness(): Harness {
   });
 
   const stub = {
+    ...rpc,
     fetch: async (request: Request): Promise<Response> => {
       forwarded.push(request);
       return response;
@@ -45,7 +49,7 @@ function createHarness(): Harness {
 
   const env = {
     HOUSEHOLD_HUB: namespace,
-    PRIVATE_BUCKET: {},
+    PRIVATE_BUCKET: bucket,
   };
 
   return { env: env as unknown as Env, forwarded, names, response };
@@ -277,15 +281,71 @@ describe('gateway forwards /api/sync/* and /api/household/* to HouseholdHub', ()
 });
 
 describe('image and WebSocket routes', () => {
-  it.each([
-    ['PUT', '/api/sync/images/abc?variant=thumb'],
-    ['PATCH', '/api/sync/images'],
-  ])('leaves %s %s for the household to handle', async (method, path) => {
-    const harness = createHarness();
-    const { request } = bodyRequest(`https://cloud.dafan.test${path}`, method, {});
+  it.each(['/api/sync/images', '/api/sync/images/abc?variant=thumb'])(
+    'rejects unsupported image methods before invoking the DO or consuming the body at %s',
+    async (path) => {
+      const harness = createHarness();
+      const { request } = bodyRequest(`https://cloud.dafan.test${path}`, 'PATCH', {});
 
-    expect(await worker.fetch(request, harness.env)).toBe(harness.response);
-    expect(harness.forwarded[0]).toBe(request);
+      const response = await worker.fetch(request, harness.env);
+      expect(response.status).toBe(405);
+      expect(response.headers.get('allow')).toBe('GET, PUT');
+      expect(harness.names).toEqual([]);
+      expect(harness.forwarded).toEqual([]);
+      await expectUntouchedBody(request);
+    },
+  );
+
+  it('reads the R2 stream in the Worker with DO RPC authorization before and after bucket.get', async () => {
+    const readImage = vi.fn().mockResolvedValue({ kind: 'found', objectKey: 'object-key' });
+    const get = vi.fn().mockResolvedValue({
+      body: streamingBody([new Uint8Array(BODY_BYTES)]),
+      size: BODY_BYTES.length,
+      httpEtag: 'fixture-etag',
+      writeHttpMetadata: vi.fn(),
+    });
+    const harness = createHarness({ readImage }, { get });
+    const authorization = 'Bearer fixture';
+
+    const response = await call(harness, '/api/sync/images/abc?variant=thumb', {
+      headers: { authorization },
+    });
+
+    expect(response.status).toBe(200);
+    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(BODY_BYTES);
+    expect(readImage.mock.calls).toEqual([
+      [authorization, { assetSha256: 'abc', variant: 'thumb' }],
+      [authorization, { assetSha256: 'abc', variant: 'thumb' }],
+    ]);
+    expect(get).toHaveBeenCalledExactlyOnceWith('object-key');
+    expect(readImage.mock.invocationCallOrder[0]).toBeLessThan(get.mock.invocationCallOrder[0]);
+    expect(get.mock.invocationCallOrder[0]).toBeLessThan(readImage.mock.invocationCallOrder[1]);
+    expect(harness.forwarded).toEqual([]);
+  });
+
+  it('checks upload metadata by DO RPC and leaves the body unread on an idempotent write', async () => {
+    const preflightImage = vi.fn().mockResolvedValue({ kind: 'existing' });
+    const put = vi.fn();
+    const harness = createHarness({ preflightImage }, { put });
+    const authorization = 'Bearer fixture';
+    const { request } = bodyRequest('https://cloud.dafan.test/api/sync/images/abc', 'PUT', {
+      authorization,
+      'content-type': 'image/webp',
+      'content-length': String(BODY_BYTES.length),
+      'x-household-epoch': '1',
+    });
+
+    expect((await worker.fetch(request, harness.env)).status).toBe(204);
+    expect(preflightImage).toHaveBeenCalledExactlyOnceWith(authorization, {
+      assetSha256: 'abc',
+      variant: null,
+      epoch: '1',
+      contentType: 'image/webp',
+      contentLength: String(BODY_BYTES.length),
+      contentSha256: null,
+    });
+    expect(put).not.toHaveBeenCalled();
+    expect(harness.forwarded).toEqual([]);
     await expectUntouchedBody(request);
   });
 

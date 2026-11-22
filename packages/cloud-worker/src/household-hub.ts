@@ -15,7 +15,6 @@ import {
   generateCredential,
   hashBearer,
   hashCredential,
-  memberRevoked,
   requireMember,
 } from './auth';
 import { AuthAttempts } from './auth-attempts';
@@ -30,7 +29,6 @@ import {
   type ImageUploadRequest,
   type PendingImageUpload,
 } from './image-protocol';
-import { proxyImage } from './image-proxy';
 import type { Env } from './index';
 import { migrateHousehold } from './schema';
 
@@ -42,8 +40,6 @@ const UNAUTHORIZED = { code: 'UNAUTHORIZED', status: 401 } as const;
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 const WS_TICKET_TTL_MS = 30_000;
 const MAX_AUTH_BODY_BYTES = 16_384;
-const IMAGES_PATH = '/api/sync/images';
-const IMAGE_METHODS = ['GET', 'PUT'];
 const HUB_METHODS = ['GET', 'POST', 'PUT', 'DELETE'];
 const NO_STORE = { 'cache-control': 'no-store' };
 
@@ -87,16 +83,6 @@ export class HouseholdHub extends DurableObject<Env> {
     const { pathname } = url;
     const { method } = request;
 
-    if (pathname === IMAGES_PATH || pathname.startsWith(`${IMAGES_PATH}/`)) {
-      if (!IMAGE_METHODS.includes(method)) return methodNotAllowed(method, pathname, IMAGE_METHODS);
-      return proxyImage(
-        request,
-        url,
-        pathname.slice(IMAGES_PATH.length + 1),
-        this,
-        this.env.PRIVATE_BUCKET,
-      );
-    }
     if (!HUB_METHODS.includes(method)) return methodNotAllowed(method, pathname, HUB_METHODS);
 
     if (method === 'POST') {
@@ -446,8 +432,8 @@ export class HouseholdHub extends DurableObject<Env> {
         .toArray()[0];
       if (!issued) return UNAUTHORIZED;
       const member = requireMember(sql, issued.token_hash);
-      if ('code' in member || member.id !== issued.member_id)
-        return memberRevoked(sql, issued.member_id);
+      if ('code' in member) return member;
+      if (member.id !== issued.member_id) return UNAUTHORIZED;
       return {
         memberId: member.id,
         role: member.role,

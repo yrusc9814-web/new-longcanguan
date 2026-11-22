@@ -208,6 +208,50 @@ describe('HouseholdHub SQLite on workerd', () => {
 });
 
 describe('private R2 images on workerd', () => {
+  it('authorizes and streams bare and full image URLs in the outer Worker, never via HouseholdHub.fetch', async () => {
+    const bare = '/api/sync/images';
+
+    // 正向对照：钩子确实武装。直接向 DO 发图片请求应命中哨兵，说明下面的“无哨兵”
+    // 断言证明的是外层绕过，而不是钩子失效。
+    const stub = await runtime.getStub();
+    const intercepted = await stub.fetch(`https://test.invalid${bare}/${digest(bytes('probe'))}`);
+    expect(intercepted.status).toBe(418);
+    expect(intercepted.headers.get('x-test-image-intercept')).toContain(bare);
+
+    // bare 路径也必须由外层处理：先鉴权，再做参数校验。
+    await expectCode(await call(bare, { headers: auth('fixture-unknown') }), 401, 'UNAUTHORIZED');
+    await expectCode(await call(bare), 401, 'UNAUTHORIZED');
+    await expectCode(await call(bare, { headers: auth(memberToken) }), 400, 'VALIDATION_ERROR');
+    await expectCode(await upload(bytes('bare-put'), bare), 400, 'VALIDATION_ERROR');
+
+    // 非 GET/PUT 在进入 DO 之前被外层拒绝；图片路径不再由 HouseholdHub.fetch 处理。
+    const rejected = await call(`${bare}/${digest(bytes('bare-delete'))}`, {
+      method: 'DELETE',
+      headers: auth(ownerToken),
+    });
+    expect(rejected.status).toBe(405);
+    expect(rejected.headers.get('allow')).toBe('GET, PUT');
+    expect(rejected.headers.get('x-test-image-intercept')).toBeNull();
+
+    const body = bytes('outer-stream');
+    const written = await upload(body);
+    expect(written.status).toBe(204);
+    expect(written.headers.get('x-test-image-intercept')).toBeNull();
+    const read = await call(`/api/sync/images/${digest(body)}`, { headers: auth(memberToken) });
+    expect(read.status).toBe(200);
+    expect(read.headers.get('x-test-image-intercept')).toBeNull();
+    expect(new Uint8Array(await read.arrayBuffer())).toEqual(body);
+
+    // 本用例的图片对象与登记行不留给后续用例（它们从空状态起算）。
+    const bucket = await runtime.getR2Bucket();
+    const listed = await bucket.list({ prefix: `images/${digest(body)}/` });
+    if (listed.objects.length > 0) await bucket.delete(listed.objects.map(({ key }) => key));
+    const cleared = await stub.fetch('https://test.invalid/__test/clear-images', {
+      method: 'POST',
+    });
+    expect(cleared.status).toBe(204);
+  });
+
   it('authorizes both verbs and refuses a raw unregistered R2 object', async () => {
     const body = bytes('unregistered');
     const sha = digest(body);
