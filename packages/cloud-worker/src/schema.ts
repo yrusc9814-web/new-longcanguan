@@ -12,6 +12,8 @@
 import { BUSINESS_INDEX_DDL, BUSINESS_TABLE_DDL } from '@dafan/shared/contracts';
 import { SHOPPING_DEFAULT_LIST_ID, SHOPPING_DEFAULT_LIST_NAME } from '@dafan/shared/sync';
 
+import { migrateSyncStorage } from './sync-storage';
+
 export const HOUSEHOLD_ID = 'default';
 
 const CONTROL_TABLE_DDL: readonly string[] = [
@@ -136,13 +138,15 @@ export function migrateHousehold(storage: DurableObjectStorage): void {
   const { sql } = storage;
   storage.transactionSync(() => {
     for (const ddl of HOUSEHOLD_SCHEMA_DDL) sql.exec(withIfNotExists(ddl));
-    sql.exec(
+    migrateSyncStorage(sql);
+    const created = sql.exec(
       `INSERT INTO household_meta (id, household_id, created_at, updated_at)
        VALUES (1, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
       HOUSEHOLD_ID,
       timestamp,
       timestamp,
-    );
+    ).rowsWritten;
+    if (!created) return;
     sql.exec(
       `INSERT INTO "Settings" ("id", "version", "createdAt", "updatedAt")
        VALUES (1, 1, ?, ?) ON CONFLICT ("id") DO NOTHING`,

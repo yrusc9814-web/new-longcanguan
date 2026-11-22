@@ -22,6 +22,7 @@ public final class SecurityRuntime {
     private final MemberTokenStore tokenStore;
     private final SecurityGateService gateService;
     private final File uploadsDirectory;
+    private final LocalDataPurge localDataPurge;
 
     private SecurityRuntime(Context context) {
         Context app = context.getApplicationContext();
@@ -30,6 +31,9 @@ public final class SecurityRuntime {
         this.tokenStore = new MemberTokenStore(new KeystoreMemberTokenStorage(securityDir));
         this.gateService = new SecurityGateService(gateStore, tokenStore);
         this.uploadsDirectory = new File(app.getFilesDir(), "uploads");
+        // Both roots come from the Context once; the bridge never receives a path.
+        File databaseDirectory = new File(app.getFilesDir().getParentFile(), "databases");
+        this.localDataPurge = new LocalDataPurge(databaseDirectory, app.getFilesDir());
     }
 
     public static SecurityRuntime install(Context context) {
@@ -69,5 +73,10 @@ public final class SecurityRuntime {
 
     public File uploadsDirectory() {
         return uploadsDirectory;
+    }
+
+    /** Fixed-root physical erasure service; no caller-supplied paths. */
+    public LocalDataPurge localDataPurge() {
+        return localDataPurge;
     }
 }

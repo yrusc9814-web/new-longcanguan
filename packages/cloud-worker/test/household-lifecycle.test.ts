@@ -120,7 +120,9 @@ it('atomically binds all three identities and preserves their data across recove
       'UNAUTHORIZED',
     );
     expect(await oldOwnerSocket.waitForClose()).toEqual({ code: 4001, reason: 'UNAUTHORIZED' });
-    expect(oldOwnerSocket.frames).toEqual([]);
+    expect(oldOwnerSocket.frames.map((frame) => JSON.parse(frame).type)).toEqual([
+      'SYNC_CONNECTED',
+    ]);
     // 馆主换票后旧票据的 token_hash 已失效：精确 401，而不是已踢成员的 403 锚点。
     const oldUpgrade = await rejectedUpgrade(runtime, staleOwnerTicket);
     expect(await expectFailure(oldUpgrade, 401, 'UNAUTHORIZED')).toEqual({
@@ -169,8 +171,8 @@ it('atomically binds all three identities and preserves their data across recove
     expect(await bucketKeys(runtime)).toEqual(committedKeys);
 
     expect(await socketA.waitForClose()).toEqual({ code: 4003, reason: 'MEMBER_REVOKED' });
-    expect(socketA.frames).toHaveLength(1);
-    expect(JSON.parse(socketA.frames[0])).toEqual({
+    expect(socketA.frames).toHaveLength(2);
+    expect(JSON.parse(socketA.frames[1])).toEqual({
       type: revoked.code,
       householdId: revoked.householdId,
       memberId: revoked.memberId,
@@ -199,7 +201,7 @@ it('atomically binds all three identities and preserves their data across recove
         new Uint8Array(await (await readImage(runtime, identity.token, body)).arrayBuffer()),
       ).toEqual(body);
       expect(socket.raw.readyState).toBe(WebSocket.OPEN);
-      expect(socket.frames).toEqual([]);
+      expect(socket.frames.map((frame) => JSON.parse(frame).type)).toEqual(['SYNC_CONNECTED']);
     }
   } finally {
     await closeAllSockets();

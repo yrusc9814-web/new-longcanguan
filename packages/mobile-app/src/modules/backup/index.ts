@@ -9,6 +9,16 @@ export interface BackupModuleOptions {
   readonly consumers: BackupConsumers;
   /** 文件桥注入；缺省用模块单例（Android 真机插件 / 桌面后备）。 */
   readonly files?: UploadsFilesBridge;
+  readonly restoreBound?: (
+    database: DatabaseClient,
+    request: Request,
+  ) => Promise<
+    | {
+        restoredTables: number;
+        restoredFiles: number;
+      }
+    | undefined
+  >;
 }
 
 /**
@@ -33,7 +43,9 @@ export function registerBackups(
 
   router.register('POST', '/api/v1/backups/restore', async ({ request }) => {
     const database = await getDatabase();
-    const result = await restoreBackup(database, request, files.consumers, { files: files.files });
+    const result =
+      (await files.restoreBound?.(database, request)) ??
+      (await restoreBackup(database, request, files.consumers, { files: files.files }));
     return dataResult(
       { restoredTables: result.restoredTables, restoredFiles: result.restoredFiles },
       { status: 200 },

@@ -26,6 +26,14 @@ const controlTables = [
   'sync_log',
   'executed_operations',
   'image_objects',
+  'processed_ops',
+  'sync_journal_rows',
+  'sync_snapshots',
+  'sync_snapshot_rows',
+  'sync_uploads',
+  'sync_upload_pages',
+  'sync_upload_rows',
+  'sync_replay_history',
 ];
 
 type SchemaRow = { type: 'table' | 'index'; name: string; tbl_name: string; sql: string };
@@ -92,6 +100,10 @@ async function expectCode(response: Response, status: number, code: string): Pro
     expect(body).toEqual({ code, householdId: 'default', memberId: expect.any(String) });
     return;
   }
+  if (code === 'EPOCH_MISMATCH') {
+    expect(body).toEqual({ code, currentEpoch: expect.any(Number) });
+    return;
+  }
   expect(body).toEqual({ code });
 }
 
@@ -132,7 +144,7 @@ afterAll(async () => {
 });
 
 describe('HouseholdHub SQLite on workerd', () => {
-  it('creates exactly the shared business schema and six controls, including composite keys', async () => {
+  it('creates the shared business schema and sync controls with their composite keys', async () => {
     const { schema, logIndexes, operationKey, household, settings, shopping } = await inspect();
     expect(schema.filter(({ type }) => type === 'table').map(({ name }) => name)).toEqual(
       [...RETAINED_MODELS, ...controlTables].sort(),

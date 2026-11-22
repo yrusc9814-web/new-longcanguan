@@ -4,7 +4,7 @@ import type { SqlValue } from '../../db/types.js';
 import { LocalApiError } from '../../local-api/protocol.js';
 import { paginated, sqlBoolean, validationError } from '../common.js';
 
-import { newLocalId } from './ids.js';
+import { mealRecordDinerId, newLocalId } from './ids.js';
 import { enqueueMealCommand } from './outbox.js';
 import {
   MEAL_ROLES,
@@ -793,7 +793,7 @@ export async function insertRecord(
     ],
   );
   await replaceItems(transaction, recordId, input.items, timestamp, newId);
-  await replaceDiners(transaction, recordId, input.dinerIds, timestamp, newId);
+  await replaceDiners(transaction, recordId, input.dinerIds, timestamp);
   const dto = await loadRecordDto(transaction, recordId);
   if (!dto) throw httpError(500, 'INTERNAL_ERROR', '饮食记录创建后读取失败');
   if (options.enqueueUpsert !== false) {
@@ -843,7 +843,6 @@ async function replaceDiners(
   recordId: string,
   dinerIds: readonly string[],
   timestamp: string,
-  newId: () => string,
 ): Promise<void> {
   for (const dinerId of [...new Set(dinerIds)]) {
     const [row] = await transaction.query<{ id: string }>(
@@ -851,10 +850,11 @@ async function replaceDiners(
       [dinerId],
     );
     if (!row) throw validationError('记录关联的食用者不存在');
+    // 行 ID 可派生：载荷 `diners` 只带 DinerDto，云端按 (recordId, dinerId) 复算同一 ID。
     await transaction.run(
       `INSERT INTO "MealRecordDiner" ("id","mealRecordId","dinerId","createdAt","updatedAt")
        VALUES (?,?,?,?,?)`,
-      [newId(), recordId, dinerId, timestamp, timestamp],
+      [mealRecordDinerId(recordId, dinerId), recordId, dinerId, timestamp, timestamp],
     );
   }
 }
@@ -1043,7 +1043,7 @@ export async function updateRecord(
     }
     if (patch.dinerIds !== undefined) {
       await tx.run(`DELETE FROM "MealRecordDiner" WHERE "mealRecordId" = ?`, [id]);
-      await replaceDiners(tx, id, patch.dinerIds, timestamp, context.newId);
+      await replaceDiners(tx, id, patch.dinerIds, timestamp);
     }
 
     const dto = await loadRecordDto(tx, id);

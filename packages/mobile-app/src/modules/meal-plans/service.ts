@@ -16,7 +16,7 @@ import {
   type MealRole,
   type MealType,
 } from '../meal-records/index.js';
-import { newLocalId } from '../meal-records/ids.js';
+import { mealPlanDinerId, mealRecordDinerId, newLocalId } from '../meal-records/ids.js';
 import { enqueueMealCommand } from '../meal-records/outbox.js';
 
 import {
@@ -427,13 +427,13 @@ async function replacePlanDiners(
   planId: string,
   dinerIds: readonly string[],
   timestamp: string,
-  newId: () => string,
 ): Promise<void> {
   for (const dinerId of [...new Set(dinerIds)]) {
+    // 行 ID 必须可派生：载荷 `diners` 只带 DinerDto，云端按 (planId, dinerId) 复算同一 ID。
     await transaction.run(
       `INSERT INTO "MealPlanDiner" ("id","mealPlanId","dinerId","createdAt","updatedAt")
        VALUES (?,?,?,?,?)`,
-      [newId(), planId, dinerId, timestamp, timestamp],
+      [mealPlanDinerId(planId, dinerId), planId, dinerId, timestamp, timestamp],
     );
   }
 }
@@ -515,7 +515,7 @@ export async function createPlan(
       ],
     );
     await replacePlanItems(transaction, planId, input.items, timestamp, context.newId);
-    await replacePlanDiners(transaction, planId, input.dinerIds, timestamp, context.newId);
+    await replacePlanDiners(transaction, planId, input.dinerIds, timestamp);
     const plan = await loadPlanDto(transaction, planId);
     if (!plan) throw new LocalApiError(500, 'INTERNAL_ERROR', '计划创建后读取失败');
     await transaction.enqueue({
@@ -610,8 +610,7 @@ export async function updatePlan(
     if (updated.changes !== 1)
       throw new VersionConflictError('MealPlan', id, version, current.version + 1);
     if (patch.items) await replacePlanItems(transaction, id, patch.items, timestamp, context.newId);
-    if (patch.dinerIds)
-      await replacePlanDiners(transaction, id, patch.dinerIds, timestamp, context.newId);
+    if (patch.dinerIds) await replacePlanDiners(transaction, id, patch.dinerIds, timestamp);
     const plan = await loadPlanDto(transaction, id);
     if (!plan) throw notFound();
     await transaction.enqueue({
@@ -935,7 +934,7 @@ export async function completePlan(
         await transaction.run(
           `INSERT INTO "MealRecordDiner" ("id","mealRecordId","dinerId","createdAt","updatedAt")
            VALUES (?,?,?,?,?)`,
-          [context.newId(), existing.id, diner.id, timestamp, timestamp],
+          [mealRecordDinerId(existing.id, diner.id), existing.id, diner.id, timestamp, timestamp],
         );
       }
       await transaction.run(

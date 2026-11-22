@@ -23,7 +23,7 @@ export type ImagePreflight =
   { kind: 'existing' } | { kind: 'upload'; upload: PendingImageUpload } | CloudFailure;
 
 export type ImageCommit = { kind: 'registered' | 'existing' } | CloudFailure;
-export type ImageRead = { kind: 'found'; objectKey: string } | CloudFailure;
+export type ImageRead = { kind: 'found'; objectKey: string; contentSha256: string } | CloudFailure;
 
 export function parseImageTarget({ assetSha256, variant }: ImageTarget) {
   const resolvedVariant = variant ?? 'main';

@@ -19,10 +19,17 @@ export async function proxyImage(
   const authorization = request.headers.get('authorization');
 
   if (request.method === 'GET') {
-    const lookup = await hub.readImage(authorization, target);
+    const epoch = request.headers.get(HOUSEHOLD_EPOCH_HEADER);
+    const lookup =
+      epoch === null
+        ? await hub.readImage(authorization, target)
+        : await hub.readImage(authorization, target, epoch);
     if ('code' in lookup) return cloudError(lookup);
     const object = await bucket.get(lookup.objectKey);
-    const current = await hub.readImage(authorization, target);
+    const current =
+      epoch === null
+        ? await hub.readImage(authorization, target)
+        : await hub.readImage(authorization, target, epoch);
     if ('code' in current || current.objectKey !== lookup.objectKey) {
       await object?.body.cancel().catch(() => undefined);
       return cloudError('code' in current ? current : NOT_FOUND);
@@ -35,6 +42,7 @@ export async function proxyImage(
       'x-content-type-options': 'nosniff',
       etag: object.httpEtag,
     });
+    if (lookup.contentSha256) headers.set(IMAGE_CONTENT_SHA256_HEADER, lookup.contentSha256);
     object.writeHttpMetadata(headers);
     return new Response(object.body, { headers });
   }

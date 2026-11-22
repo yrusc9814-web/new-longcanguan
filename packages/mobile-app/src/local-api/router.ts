@@ -61,6 +61,7 @@ export interface LocalApiRouterOptions {
   readonly isPinTokenValid?: (token: string) => boolean | Promise<boolean>;
   /** 数据库不可用或未注入探针时返回 503 DATABASE_ERROR。 */
   readonly healthDatabaseProbe?: LocalApiDatabaseProbe;
+  readonly onMutation?: () => void;
   /** 时间源，便于测试固定 timestamp。 */
   readonly now?: () => Date;
 }
@@ -261,7 +262,13 @@ export class LocalApiRouter {
 
       if (registered) {
         const context = this.createContext(request, method, path, url, registered.params);
-        return resolveHandlerResult(await registered.route.handler(context));
+        const result = await registered.route.handler(context);
+        if ((await this.readGateState()).pendingWipe) {
+          throw new LocalApiError(403, 'MEMBER_REVOKED', '成员权限已移除，本地数据待清空');
+        }
+        const response = resolveHandlerResult(result);
+        if (response.ok && method !== 'GET') this.options.onMutation?.();
+        return response;
       }
 
       if (retained) {

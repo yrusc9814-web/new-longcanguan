@@ -96,7 +96,11 @@ type NativeUploadsFiles = Omit<
   writeRestoreFile(options: { path: string; dataBase64: string }): Promise<void>;
 };
 
-function encodeBase64(bytes: Uint8Array): string {
+export function decodeBase64(data: string): Uint8Array<ArrayBuffer> {
+  return Uint8Array.from(atob(data), (char) => char.charCodeAt(0));
+}
+
+export function encodeBase64(bytes: Uint8Array): string {
   let binary = '';
   for (let offset = 0; offset < bytes.length; offset += 8192) {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
@@ -110,7 +114,7 @@ function createNativeUploadsFiles(): UploadsFilesBridge {
     async readFile(options) {
       const { data } = await plugin.readFile(options);
       return {
-        data: data == null ? null : Uint8Array.from(atob(data), (char) => char.charCodeAt(0)),
+        data: data == null ? null : decodeBase64(data),
       };
     },
     writeFile: ({ path, data }) => plugin.writeFile({ path, dataBase64: encodeBase64(data) }),

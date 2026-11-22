@@ -174,6 +174,16 @@ export function newStoreId(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * `StoreMealType` 行主键必须可派生。
+ *
+ * 店铺聚合载荷的 `mealTypes` 只是字符串数组（无行 ID），云端按
+ * `(storeId, mealType)` 复算；端侧用随机 ID 会在拉取后与云端行并存。
+ */
+export function storeMealTypeId(storeId: string, mealType: string): string {
+  return `smt:${storeId}:${mealType}`;
+}
+
 /** 文本列：null/undefined → null；非字符串或超限 400；去空白后为空同样落 null。 */
 function cleanedText(value: unknown, field: string, limit = STORE_TEXT_LIMIT): string | null {
   if (value === null || value === undefined) return null;
@@ -728,7 +738,7 @@ async function replaceMealTypes(
     await transaction.run(
       `INSERT INTO "StoreMealType" ("id", "storeId", "mealType", "createdAt", "updatedAt")
        VALUES (?, ?, ?, ?, ?)`,
-      [newStoreId(), storeId, mealType, timestamp, timestamp],
+      [storeMealTypeId(storeId, mealType), storeId, mealType, timestamp, timestamp],
     );
   }
 }

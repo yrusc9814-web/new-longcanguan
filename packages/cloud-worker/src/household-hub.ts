@@ -1,12 +1,14 @@
-import type {
-  HouseholdBinding,
-  HouseholdIdentity,
-  HouseholdInviteResponse,
-  HouseholdMember,
-  HouseholdMembersResponse,
-  HouseholdRole,
-  MemberRevokedFrame,
-  WebSocketTicketResponse,
+import {
+  HOUSEHOLD_EPOCH_HEADER,
+  type CloudServerFrame,
+  type HouseholdBinding,
+  type HouseholdIdentity,
+  type HouseholdInviteResponse,
+  type HouseholdMember,
+  type HouseholdMembersResponse,
+  type HouseholdRole,
+  type MemberRevokedFrame,
+  type WebSocketTicketResponse,
 } from '@dafan/shared/sync';
 import { DurableObject } from 'cloudflare:workers';
 
@@ -31,8 +33,10 @@ import {
 } from './image-protocol';
 import type { Env } from './index';
 import { migrateHousehold } from './schema';
+import { isSyncRoute, serveSync, SYNC_ROUTES } from './sync-routes';
 
-const EPOCH_MISMATCH = { code: 'EPOCH_MISMATCH', status: 409 } as const;
+const epochMismatch = (currentEpoch: number) =>
+  ({ code: 'EPOCH_MISMATCH', status: 409, currentEpoch }) as const;
 const NOT_FOUND = { code: 'NOT_FOUND', status: 404 } as const;
 const CONFLICT = { code: 'CONFLICT', status: 409 } as const;
 const VALIDATION_ERROR = { code: 'VALIDATION_ERROR', status: 400 } as const;
@@ -53,6 +57,7 @@ interface SocketAttachment {
   memberId: string;
   role: HouseholdRole;
   tokenHash: string;
+  connectionId?: string;
 }
 
 function nicknameFrom(value: unknown): string | undefined {
@@ -84,6 +89,14 @@ export class HouseholdHub extends DurableObject<Env> {
     const { method } = request;
 
     if (!HUB_METHODS.includes(method)) return methodNotAllowed(method, pathname, HUB_METHODS);
+
+    if (isSyncRoute(pathname)) {
+      const expected = SYNC_ROUTES[pathname];
+      if (method !== expected) return methodNotAllowed(method, pathname, [expected]);
+      return serveSync(this.ctx.storage, request, url, pathname, (frame, source) =>
+        this.#publish(frame, source),
+      );
+    }
 
     if (method === 'POST') {
       switch (pathname) {
@@ -396,16 +409,22 @@ export class HouseholdHub extends DurableObject<Env> {
     const member = requireMember(sql, tokenHash);
     if ('code' in member) return cloudError(member);
 
+    const epoch = this.#meta().epoch;
+    const requestedEpoch = request.headers.get(HOUSEHOLD_EPOCH_HEADER);
+    if (requestedEpoch !== null && requestedEpoch !== String(epoch))
+      return cloudError(epochMismatch(epoch));
+
     const now = Date.now();
     const expiresAt = now + WS_TICKET_TTL_MS;
     sql.exec('DELETE FROM ws_tickets WHERE expires_at <= ?', now);
     sql.exec(
-      'INSERT INTO ws_tickets (ticket_hash, member_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO ws_tickets (ticket_hash, member_id, token_hash, expires_at, created_at, epoch) VALUES (?, ?, ?, ?, ?, ?)',
       ticketHash,
       member.id,
       tokenHash,
       expiresAt,
       now,
+      epoch,
     );
     return Response.json(
       { ticket, expiresAt: new Date(expiresAt).toISOString() } satisfies WebSocketTicketResponse,
@@ -425,8 +444,8 @@ export class HouseholdHub extends DurableObject<Env> {
       const now = Date.now();
       sql.exec('DELETE FROM ws_tickets WHERE expires_at <= ?', now);
       const issued = sql
-        .exec<{ member_id: string; token_hash: string }>(
-          'DELETE FROM ws_tickets WHERE ticket_hash = ? RETURNING member_id, token_hash',
+        .exec<{ member_id: string; token_hash: string; epoch: number }>(
+          'DELETE FROM ws_tickets WHERE ticket_hash = ? RETURNING member_id, token_hash, epoch',
           ticketHash,
         )
         .toArray()[0];
@@ -434,22 +453,29 @@ export class HouseholdHub extends DurableObject<Env> {
       const member = requireMember(sql, issued.token_hash);
       if ('code' in member) return member;
       if (member.id !== issued.member_id) return UNAUTHORIZED;
+      const { epoch } = this.#meta();
+      if (issued.epoch !== epoch) return epochMismatch(epoch);
       return {
         memberId: member.id,
         role: member.role,
         tokenHash: issued.token_hash,
+        connectionId: crypto.randomUUID(),
       } satisfies SocketAttachment;
     });
     if ('code' in result) return cloudError(result);
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment(result);
+    server.send(
+      JSON.stringify({
+        type: 'SYNC_CONNECTED',
+        connectionId: result.connectionId,
+      } satisfies CloudServerFrame),
+    );
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
-    // Sync message handling belongs to VAN-208. Every message still revalidates its session.
-    void message;
+  webSocketMessage(socket: WebSocket): void {
     const attachment = this.#attachment(socket);
     if (!attachment) {
       this.#closeSocket(socket, 4001, 'UNAUTHORIZED');
@@ -488,6 +514,28 @@ export class HouseholdHub extends DurableObject<Env> {
 
   #attachment(socket: WebSocket): SocketAttachment | null {
     return socket.deserializeAttachment() as SocketAttachment | null;
+  }
+
+  #publish(frame: CloudServerFrame, source?: { connectionId: string; memberId: string }): void {
+    const data = JSON.stringify(frame);
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket.readyState !== WebSocket.OPEN) continue;
+      const attachment = this.#attachment(socket);
+      if (
+        !attachment ||
+        (source &&
+          attachment.connectionId === source.connectionId &&
+          attachment.memberId === source.memberId)
+      )
+        continue;
+      const member = requireMember(this.ctx.storage.sql, attachment.tokenHash);
+      if ('code' in member || member.id !== attachment.memberId) continue;
+      try {
+        socket.send(data);
+      } catch {
+        this.#closeSocket(socket);
+      }
+    }
   }
 
   #disconnect(
@@ -532,7 +580,7 @@ export class HouseholdHub extends DurableObject<Env> {
     if ('code' in member) return member;
 
     const epoch = this.#meta().epoch;
-    if (request.epoch !== String(epoch)) return EPOCH_MISMATCH;
+    if (request.epoch !== String(epoch)) return epochMismatch(epoch);
 
     const image = parseImageUpload(request);
     if ('code' in image) return image;
@@ -553,7 +601,8 @@ export class HouseholdHub extends DurableObject<Env> {
       const sql = storage.sql;
       const member = requireMember(sql, hash);
       if ('code' in member) return member;
-      if (image.epoch !== this.#meta().epoch) return EPOCH_MISMATCH;
+      const { epoch } = this.#meta();
+      if (image.epoch !== epoch) return epochMismatch(epoch);
 
       const existing = this.#findImage(image.assetSha256, image.variant);
       if (existing) {
@@ -578,14 +627,23 @@ export class HouseholdHub extends DurableObject<Env> {
     });
   }
 
-  async readImage(authorization: string | null, target: ImageTarget): Promise<ImageRead> {
+  async readImage(
+    authorization: string | null,
+    target: ImageTarget,
+    requestedEpoch?: string,
+  ): Promise<ImageRead> {
     const member = requireMember(this.ctx.storage.sql, await hashBearer(authorization));
     if ('code' in member) return member;
+    const { epoch } = this.#meta();
+    if (requestedEpoch !== undefined && requestedEpoch !== String(epoch))
+      return epochMismatch(epoch);
 
     const image = parseImageTarget(target);
     if (!image) return { code: 'VALIDATION_ERROR', status: 400 } satisfies CloudFailure;
     const entry = this.#findImage(image.assetSha256, image.variant);
-    return entry ? { kind: 'found', objectKey: entry.object_key } : NOT_FOUND;
+    return entry
+      ? { kind: 'found', objectKey: entry.object_key, contentSha256: entry.content_sha256 }
+      : NOT_FOUND;
   }
 
   #findImage(assetSha256: string, variant: string) {

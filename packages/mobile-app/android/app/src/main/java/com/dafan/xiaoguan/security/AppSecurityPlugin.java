@@ -1,5 +1,6 @@
 package com.dafan.xiaoguan.security;
 
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -97,6 +98,32 @@ public final class AppSecurityPlugin extends Plugin {
         } catch (SecurityPersistenceException ex) {
             call.reject("Unable to clear the member token", "TOKEN_CLEAR_FAILED");
         }
+    }
+
+    /**
+     * Physically erases the local business data (SQLite files, {@code uploads/}, {@code uploads-restore/}).
+     *
+     * <p>Refuses to run unless {@code lockedPendingWipe} is already persisted: the durable gate must be
+     * in place before any byte is deleted, so a failed wipe can never leave readable data behind an
+     * open gate. No path parameter is accepted; {@link SecurityRuntime} supplies the fixed roots.</p>
+     */
+    @PluginMethod
+    public void purgeLocalData(PluginCall call) {
+        SecurityRuntime runtime = SecurityRuntime.get(getContext());
+        if (!runtime.gateStore().get().lockedPendingWipe()) {
+            call.reject("The device is not pending wipe", "NOT_LOCKED");
+            return;
+        }
+        LocalDataPurge.PurgeReport report = runtime.localDataPurge().run();
+        JSObject result = new JSObject();
+        result.put("complete", report.complete());
+        result.put("databaseRemoved", report.databaseRemoved());
+        result.put("uploadsRemoved", report.uploadsRemoved());
+        result.put("restoreRemoved", report.restoreRemoved());
+        JSArray failed = new JSArray();
+        for (String name : report.failed()) failed.put(name);
+        result.put("failed", failed);
+        call.resolve(result);
     }
 
     private SecurityGateService service() {

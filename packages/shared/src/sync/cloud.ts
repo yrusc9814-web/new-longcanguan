@@ -31,8 +31,15 @@ export interface MemberRevokedResponse {
   readonly memberId: string;
 }
 
+export interface EpochMismatchResponse {
+  readonly code: 'EPOCH_MISMATCH';
+  readonly currentEpoch: number;
+}
+
 export type CloudErrorResponse =
-  { readonly code: Exclude<CloudErrorCode, 'MEMBER_REVOKED'> } | MemberRevokedResponse;
+  | { readonly code: Exclude<CloudErrorCode, 'MEMBER_REVOKED' | 'EPOCH_MISMATCH'> }
+  | MemberRevokedResponse
+  | EpochMismatchResponse;
 
 export interface ImageMetadata {
   readonly assetSha256: string;
@@ -101,4 +108,21 @@ export interface MemberRevokedFrame {
   readonly memberId: string;
 }
 
-export type CloudServerFrame = MemberRevokedFrame;
+export interface SyncConnectedFrame {
+  readonly type: 'SYNC_CONNECTED';
+  readonly connectionId: string;
+}
+
+export interface SyncAvailableFrame {
+  readonly type: 'SYNC_AVAILABLE';
+  readonly epoch: number;
+  readonly seq: number;
+}
+
+export interface EpochResetFrame {
+  readonly type: 'EPOCH_RESET';
+  readonly epoch: number;
+}
+
+export type CloudServerFrame =
+  MemberRevokedFrame | SyncConnectedFrame | SyncAvailableFrame | EpochResetFrame;

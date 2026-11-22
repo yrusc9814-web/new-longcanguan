@@ -25,6 +25,11 @@ import { isAbsolute, join } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
+import type {
+  DurableObjectNamespace,
+  DurableObjectStub,
+  R2Bucket,
+} from '@cloudflare/workers-types';
 import { build } from 'esbuild';
 import { Miniflare } from 'miniflare';
 

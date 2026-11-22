@@ -1229,9 +1229,9 @@ describe('T-004 A：排餐 / 记录 / 菜谱打卡与确定性同步命令', () 
       expect(opId).toMatch(/^[0-9a-f]{32}$/);
       expect(consumed).not.toContain(opId);
     }
-    // 注入的 newId 只用于实体/子行主键：建计划 3（计划+项目+就餐人）、完成 3（草稿+项目+就餐人）、
-    // 打卡 3（记录+项目+就餐人）；撤销/删除与所有发件箱 opId 都不消耗它。
-    expect(consumed).toHaveLength(9);
+    // 建计划、完成和打卡各使用两个注入的 ID（父行和项目），就餐人行使用派生主键。
+    // 撤销、删除及发件箱 opId 都不消耗注入的 ID。
+    expect(consumed).toHaveLength(6);
     expect(consumed.every((id) => id.startsWith('injected-'))).toBe(true);
   });
 

@@ -59,19 +59,101 @@ export type SyncOperation =
 
 export interface SyncPushRequest {
   readonly deviceId: string;
+  readonly wsConnectionId?: string;
   readonly operations: readonly SyncOperation[];
 }
 
 export interface SyncRejection {
   readonly operationId: string;
-  readonly code: 'VERSION_CONFLICT' | 'IDEMPOTENCY_CONFLICT';
+  readonly code:
+    'VERSION_CONFLICT' | 'IDEMPOTENCY_CONFLICT' | 'PLAN_SLOT_CONFLICT' | 'INSUFFICIENT_STOCK';
   readonly serverVersion: number | null;
+  readonly ingredientId?: string;
+  readonly winner?: SyncPayload;
+}
+
+export interface SyncAcknowledgement {
+  readonly operationId: string;
+  readonly ackSeq: number;
+  readonly newVersion: number;
 }
 
 export interface SyncPushResult {
   readonly acceptedOperationIds: readonly string[];
+  readonly acknowledgements: readonly SyncAcknowledgement[];
   readonly rejected: readonly SyncRejection[];
 }
+
+/** Bare SQLite row, or null for a physical deletion. Soft deletes carry the complete row. */
+export interface SyncRowChange {
+  readonly table: SyncEntityName;
+  readonly id: string | number;
+  readonly row: SyncPayload | null;
+}
+
+export interface SyncJournalEntry {
+  readonly seq: number;
+  readonly operationId: string;
+  readonly changes: readonly SyncRowChange[];
+}
+
+export interface SyncPullPage {
+  readonly epoch: number;
+  readonly entries: readonly SyncJournalEntry[];
+  readonly nextSeq: number;
+  readonly hasMore: boolean;
+}
+
+export interface SyncSnapshotPage {
+  readonly epoch: number;
+  readonly seq: number;
+  readonly rows: readonly SyncRowChange[];
+  readonly nextCursor: SyncCursor | null;
+  readonly isEmpty: boolean;
+}
+
+export interface SyncSnapshotUpload {
+  readonly uploadId: string;
+  readonly page: number;
+  readonly rows: readonly SyncRowChange[];
+  readonly finalize: boolean;
+}
+
+export interface SyncSnapshotUploadResult {
+  readonly epoch: number;
+  readonly seq: number;
+  readonly complete: boolean;
+}
+
+export const SYNC_SNAPSHOT_TABLES = [
+  'Settings',
+  'Diner',
+  'Ingredient',
+  'InventoryBatch',
+  'KitchenTool',
+  'Recipe',
+  'Tag',
+  'RecipeIngredient',
+  'RecipeMealRole',
+  'RecipeMealType',
+  'RecipeStep',
+  'RecipeTag',
+  'RecipeTool',
+  'Store',
+  'StoreMealType',
+  'StoreMenuItem',
+  'MealPlan',
+  'MealPlanDiner',
+  'MealPlanItem',
+  'MealRecord',
+  'MealRecordDiner',
+  'MealRecordItem',
+  'InventoryLog',
+  'ShoppingList',
+  'ShoppingListItem',
+  'ShoppingCheckinOperation',
+  'UploadAsset',
+] as const satisfies readonly SyncEntityName[];
 
 export interface SyncPullRequest {
   readonly cursor: SyncCursor | null;

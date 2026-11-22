@@ -78,7 +78,19 @@ public final class UploadsFilesPlugin extends Plugin {
             return;
         }
         try {
-            store().write(path, data);
+            UploadsFileStore fileStore = store();
+            fileStore.write(path, data);
+            // The gate can close between the check above and the rename; re-check and undo the
+            // write so a wipe that ran in that window cannot leave a readable file behind.
+            if (isWipePending()) {
+                try {
+                    fileStore.deleteAll(java.util.Collections.singletonList(path));
+                } catch (IOException ignored) {
+                    // The purge pass removes the whole tree anyway; report the closed gate.
+                }
+                call.reject("The device is pending wipe", "MEMBER_REVOKED");
+                return;
+            }
             call.resolve();
         } catch (IOException ex) {
             call.reject("Unable to write the uploads file", "FILE_WRITE_FAILED");
@@ -187,6 +199,10 @@ public final class UploadsFilesPlugin extends Plugin {
             throw new IOException("The uploads directory is unavailable");
         }
         return new UploadsFileStore(runtime.uploadsDirectory());
+    }
+
+    private boolean isWipePending() {
+        return SecurityRuntime.get(getContext()).gateStore().get().lockedPendingWipe();
     }
 
     private static Object JSONObject_NULL() {

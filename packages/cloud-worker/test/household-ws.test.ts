@@ -205,11 +205,14 @@ describe('成员撤权：精确帧与 4003，且不影响馆主/其他成员', (
     expect(close.code).toBe(4003);
     expect(close.reason).toBe('MEMBER_REVOKED');
 
-    // 馆主与第三名成员完全不中断：没有关闭，也没有收到任何帧。
+    // 馆主与第三名成员仍在线，仅收到初始连接帧。
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(ownerSocket.frames).toEqual([]);
+    const connected = expect.stringMatching(
+      /^\{"type":"SYNC_CONNECTED","connectionId":"[0-9a-f-]+"\}$/,
+    );
+    expect(ownerSocket.frames).toEqual([connected]);
     expect(ownerSocket.closes).toEqual([]);
-    expect(thirdSocket.frames).toEqual([]);
+    expect(thirdSocket.frames).toEqual([connected]);
     expect(thirdSocket.closes).toEqual([]);
 
     // 他们的票据与身份仍然可用。
@@ -237,7 +240,7 @@ describe('成员撤权：精确帧与 4003，且不影响馆主/其他成员', (
     ).toBe(204);
     const close = await socket.waitForClose();
     expect(close.code).toBe(4001);
-    expect(socket.frames).toEqual([]);
+    expect(socket.frames.map((frame) => JSON.parse(frame).type)).toEqual(['SYNC_CONNECTED']);
   }, 20_000);
 
   it('reauthorizes a sleeping connection when its next message wakes the DO', async () => {
@@ -485,7 +488,7 @@ describe('三方 R2/WS 复核', () => {
       });
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(memberSocket.frames).toEqual(['{"probe":1}']);
+    expect(memberSocket.frames.slice(1)).toEqual(['{"probe":1}']);
     expect(memberSocket.closes).toEqual([]);
     memberSocket.close();
   });

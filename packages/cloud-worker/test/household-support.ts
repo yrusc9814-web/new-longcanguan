@@ -153,7 +153,7 @@ export function call(
 export async function snapshot(runtime: WorkerdHarness): Promise<Snapshot> {
   const response = await call(runtime, '/__test/inspect');
   expect(response.status).toBe(200);
-  return response.json<Snapshot>();
+  return (await response.json()) as Snapshot;
 }
 
 export async function expectFailure(
@@ -161,7 +161,7 @@ export async function expectFailure(
   status: number,
   code: string,
 ): Promise<Record<string, unknown>> {
-  const body = await response.json<Record<string, unknown>>();
+  const body = (await response.json()) as Record<string, unknown>;
   expect(response.status, `${response.status}: ${JSON.stringify(body)}`).toBe(status);
   expect(body.code).toBe(code);
   return body;
@@ -185,7 +185,7 @@ export async function initOwner(
     body: JSON.stringify({ bootstrapSecret: BOOTSTRAP_SECRET, nickname }),
   });
   expect(response.status, `init failed: ${await response.clone().text()}`).toBe(201);
-  return response.json<Binding>();
+  return (await response.json()) as Binding;
 }
 
 export async function recoverOwner(
@@ -200,7 +200,7 @@ export async function recoverOwner(
     body: JSON.stringify({ bootstrapSecret: BOOTSTRAP_SECRET, ...(nickname ? { nickname } : {}) }),
   });
   expect(response.status, `recover failed: ${await response.clone().text()}`).toBe(200);
-  return response.json<Binding>();
+  return (await response.json()) as Binding;
 }
 
 export async function invite(runtime: WorkerdHarness, ownerToken: string) {
@@ -209,7 +209,7 @@ export async function invite(runtime: WorkerdHarness, ownerToken: string) {
     headers: auth(ownerToken),
   });
   expect(response.status).toBe(201);
-  return response.json<{ inviteCode: string; expiresAt: string }>();
+  return (await response.json()) as { inviteCode: string; expiresAt: string };
 }
 
 export async function join(
@@ -225,7 +225,7 @@ export async function join(
     body: JSON.stringify({ inviteCode, nickname }),
   });
   expect(response.status, `join failed: ${await response.clone().text()}`).toBe(201);
-  return response.json<Binding>();
+  return (await response.json()) as Binding;
 }
 
 export async function members(
@@ -257,7 +257,7 @@ export async function issueTicket(runtime: WorkerdHarness, token: string): Promi
 export async function ticket(runtime: WorkerdHarness, token: string) {
   const response = await issueTicket(runtime, token);
   expect(response.status, `ticket failed: ${await response.clone().text()}`).toBe(201);
-  return response.json<{ ticket: string; expiresAt: string }>();
+  return (await response.json()) as { ticket: string; expiresAt: string };
 }
 
 /** 客户端侧的可断言 WebSocket 包装：缓冲消息与关闭帧，便于等待精确帧。 */

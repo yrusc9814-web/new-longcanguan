@@ -449,13 +449,22 @@ export async function restoreBackup(
   const token = request.headers.get('X-High-Risk-Token');
   await consumers.consumeHighRiskToken(token);
 
+  const { staged, ordered } = await validateBackup(database, request);
+  await commitBackupRestore(database, options.files ?? defaultFiles, staged, ordered, consumers);
+  return {
+    restoredTables: BUSINESS_TABLES.length,
+    restoredFiles: staged.uploadFiles_.size,
+    replacedUploads: [...staged.uploadFiles_.keys()].sort(),
+  };
+}
+
+export async function validateBackup(database: DatabaseClient, request: Request) {
   const form = await readFormDataBody(request);
   const file = form.get('file');
   if (!(file instanceof Blob)) {
     throw new LocalApiError(422, 'INVALID_FILE', '缺少 file 备份字段');
   }
-  const zipBytes = new Uint8Array(await file.arrayBuffer()) as Uint8Array<ArrayBuffer>;
-  const staged = stageRestoreSync(zipBytes);
+  const staged = stageRestoreSync(new Uint8Array(await file.arrayBuffer()));
   await verifyStagedHashes(staged);
   const ordered = await verifyStagedSchema(database, staged);
   const expectedFiles = uploadReferences(staged.tables);
@@ -465,9 +474,18 @@ export async function restoreBackup(
   ) {
     throw new LocalApiError(422, 'INVALID_FILE', '备份图片与业务数据引用不一致');
   }
+  return { staged, ordered };
+}
 
-  const filesBridge = options.files ?? defaultFiles;
-  return restoreQueue.run(async () => {
+export async function commitBackupRestore(
+  database: DatabaseClient,
+  filesBridge: UploadsFilesBridge,
+  staged: StagedRestore,
+  ordered: readonly string[],
+  consumers: Pick<BackupConsumers, 'lockPin'>,
+  onCommit?: (tx: WriteTransaction) => Promise<void>,
+): Promise<void> {
+  await restoreQueue.run(async () => {
     const previousId = await committedRestoreId(database);
     await filesBridge.recoverRestore({ restoreId: previousId });
     const restoreId = previousId >= 0x7fffffff || previousId < 0 ? 1 : previousId + 1;
@@ -479,6 +497,7 @@ export async function restoreBackup(
       await database.withWriteTransaction(async (tx) => {
         await replaceBusinessTables(tx, staged, ordered);
         await tx.run('DELETE FROM "sync_outbox"');
+        await onCommit?.(tx);
         // SQLite rolls this marker back with the business rows if commit fails.
         await tx.exec(`PRAGMA application_id = ${restoreId}`);
         await consumers.lockPin();
@@ -488,11 +507,6 @@ export async function restoreBackup(
       // Re-read the committed ID so recovery also handles an uncertain commit outcome.
       await filesBridge.recoverRestore({ restoreId: await committedRestoreId(database) });
     }
-    return {
-      restoredTables: BUSINESS_TABLES.length,
-      restoredFiles: expectedFiles.length,
-      replacedUploads: expectedFiles,
-    };
   });
 }
 
