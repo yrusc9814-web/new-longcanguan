@@ -29,6 +29,7 @@ const status: SyncStatusSnapshot = {
   epoch: 1,
   lastSeq: 7,
   pendingOperations: 0,
+  latestSafetyBackup: null,
   lastError: null,
   lastSyncedAt: '2026-03-04T05:06:07.000Z',
 };

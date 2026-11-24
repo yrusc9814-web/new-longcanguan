@@ -304,6 +304,7 @@ export class SyncEngine {
       return { binding: { ...local, epoch: snapshot.epoch }, initialized: false };
     } finally {
       this.pendingOrigin = null;
+      void this.wake();
     }
   }
 
@@ -345,6 +346,7 @@ export class SyncEngine {
       };
     } finally {
       this.pendingOrigin = null;
+      void this.wake();
     }
   }
 
