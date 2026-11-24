@@ -443,37 +443,41 @@ export interface ConvergeOutcome {
  * 冲突收敛的本地事务部分：整条被丢操作链的本地副作用回滚与云端权威集合落库，
  * 在同一个写事务内完成（要么全回滚并完整对齐，要么全不生效）。
  */
-export async function convergePushConflicts(
-  database: DatabaseClient,
+export async function applyPushConflicts(
+  tx: WriteTransaction,
   conflicts: readonly PushConflict[],
 ): Promise<Map<string, ConvergeOutcome>> {
   const outcomes = new Map<string, ConvergeOutcome>();
   if (conflicts.length === 0) return outcomes;
   const cache = createColumnCache();
-  await database.withWriteTransaction(async (tx) => {
-    for (const conflict of conflicts) {
-      const ids = collectChainEffects(conflict);
-      await rollbackChainEffects(tx, ids);
-      // 被拒 SHOPPING_CHECKIN 已从清单移除的条目放回（先放回，再让权威行覆盖为服务端事实）。
-      for (const [id, row] of ids.restoredItems) {
-        const [existing] = await tx.query<{ id: string }>(
-          `SELECT "id" FROM "ShoppingListItem" WHERE "id" = ?`,
-          [id],
-        );
-        if (existing) continue;
-        await applyRowChanges(tx, cache, [{ table: 'ShoppingListItem', id, row: row as never }]);
-      }
-      if (conflict.authoritative.length > 0) {
-        await applyAuthoritative(tx, cache, conflict.authoritative);
-      }
-      outcomes.set(conflict.opId, {
-        planRemoved: Boolean(ids.planId && ids.planIsNew),
-        ingredientRolledBack: ids.batchIds.size > 0 || ids.logIds.size > 0,
-        authoritative: conflict.authoritative.length > 0,
-      });
+  await tx.exec('PRAGMA defer_foreign_keys = ON');
+  for (const conflict of conflicts) {
+    const ids = collectChainEffects(conflict);
+    await rollbackChainEffects(tx, ids);
+    // 被拒入库移除的条目先还原，再让权威行覆盖。
+    for (const [id, row] of ids.restoredItems) {
+      const [existing] = await tx.query<{ id: string }>(
+        `SELECT "id" FROM "ShoppingListItem" WHERE "id" = ?`,
+        [id],
+      );
+      if (existing) continue;
+      await applyRowChanges(tx, cache, [{ table: 'ShoppingListItem', id, row: row as never }]);
     }
-  });
+    await applyAuthoritative(tx, cache, conflict.authoritative);
+    outcomes.set(conflict.opId, {
+      planRemoved: Boolean(ids.planId && ids.planIsNew),
+      ingredientRolledBack: ids.batchIds.size > 0 || ids.logIds.size > 0,
+      authoritative: conflict.authoritative.length > 0,
+    });
+  }
   return outcomes;
+}
+
+export async function convergePushConflicts(
+  database: DatabaseClient,
+  conflicts: readonly PushConflict[],
+): Promise<Map<string, ConvergeOutcome>> {
+  return database.withWriteTransaction((tx) => applyPushConflicts(tx, conflicts));
 }
 
 /**

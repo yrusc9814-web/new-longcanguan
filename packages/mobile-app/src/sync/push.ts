@@ -26,6 +26,7 @@ import {
   type OutboxChainRow,
   type OutboxRow,
 } from './ledger.js';
+import { applyPushConflicts, type ConvergeOutcome } from './pull.js';
 
 /**
  * 云端在拒绝某个聚合根时附带该聚合的完整权威行集合（父行 + 全部相关子行）。
@@ -73,6 +74,7 @@ function readAuthoritative(raw: unknown): AuthoritativeEntityRows[] {
 export interface PushResult {
   readonly accepted: number;
   readonly conflicts: PushConflict[];
+  readonly outcomes: ReadonlyMap<string, ConvergeOutcome>;
   /** 服务端既未 ack 也未拒绝（异常守卫），保留待重推。 */
   readonly unresolved: number;
 }
@@ -141,14 +143,14 @@ function parseResult(raw: unknown): SyncPushResult {
 /**
  * 推送直到发件箱清空或达到批次上限。
  *
- * 被拒绝的操作连同其同实体的后继操作一起从发件箱移除（版本链已断，后继必然失败），
- * 由调用方执行回滚与权威数据重放。
+ * 被拒操作链、其本地副作用与权威行在同一写事务内收敛。
  */
 export async function pushOutbox(options: PushOptions): Promise<PushResult> {
   const batchSize = options.batchSize ?? 50;
   const maxBatches = options.maxBatches ?? 4;
   let accepted = 0;
   const conflicts: PushConflict[] = [];
+  let outcomes: ReadonlyMap<string, ConvergeOutcome> = new Map();
   let unresolved = 0;
 
   for (let batch = 0; batch < maxBatches; batch += 1) {
@@ -182,6 +184,12 @@ export async function pushOutbox(options: PushOptions): Promise<PushResult> {
     const acceptedIds = new Set(response.acceptedOperationIds);
     const rejectedIds = new Set(response.rejected.map((entry) => entry.operationId));
     const byId = new Map(rows.map((row) => [row.opId, row]));
+    if (
+      [...acceptedIds, ...rejectedIds].some((id) => !byId.has(id)) ||
+      [...rejectedIds].some((id) => acceptedIds.has(id))
+    ) {
+      throw new SyncHttpError(502, 'BAD_RESPONSE', '推送响应的操作编号无效');
+    }
 
     await options.database.withWriteTransaction(async (tx) => {
       for (const opId of acceptedIds) await dropOperation(tx, opId);
@@ -209,6 +217,7 @@ export async function pushOutbox(options: PushOptions): Promise<PushResult> {
           ),
         });
       }
+      outcomes = await applyPushConflicts(tx, conflicts);
     });
 
     accepted += acceptedIds.size;
@@ -218,5 +227,5 @@ export async function pushOutbox(options: PushOptions): Promise<PushResult> {
     if (rejectedIds.size > 0 || response.acceptedOperationIds.length === 0) break;
   }
 
-  return { accepted, conflicts, unresolved };
+  return { accepted, conflicts, outcomes, unresolved };
 }

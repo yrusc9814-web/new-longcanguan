@@ -86,25 +86,17 @@ export async function consumeMemberRemovedNotice(): Promise<MemberRemovedNotice 
 /** 主线程清理在跑 WebView 的 localStorage/cookie/缓存；失败即保持清退锁定。 */
 async function clearWebViewData(): Promise<boolean> {
   const { cleared } = await appSecurity.clearWebViewData();
-  return cleared === true;
+  if (!cleared) return false;
+  globalThis.localStorage?.clear();
+  globalThis.sessionStorage?.clear();
+  return true;
 }
 
 async function closeDatabase(): Promise<void> {
   // 先落闸：即使某个在途请求此刻才调 getDatabase()，也不会在删除后重新建库。
   wipeInProgress = true;
-  const pending = database;
-  resetDatabaseHandles();
-  if (!pending) return;
-  try {
-    const handle = await pending;
-    await handle.close();
-  } catch {
-    // 连接打不开或已关闭：句柄已丢弃，物理删除照常执行。
-  }
-}
-
-/** 只丢句柄，不清 `wipeInProgress`。 */
-function resetDatabaseHandles(): void {
+  const handle = await pending?.catch(() => undefined);
+  await handle?.close();
   database = undefined;
 }
 
@@ -161,11 +153,14 @@ function scheduleReloadAfterWipe(): void {
   };
   try {
     host.setTimeout?.(() => {
-      try {
-        host.location?.reload?.();
-      } catch {
-        // 文档不可重载时保持当前会话；下一次冷启动会落到同一份干净状态。
-      }
+      if (!host.location?.reload) return;
+      // 清退完成事件或本地请求可能已打开新库。原生连接跨文档存活，重载前必须先关闭。
+      void closeDatabase()
+        .then(() => host.location?.reload())
+        .catch(() => {
+          // 连接关闭失败时保留当前文档，让它继续使用新库。
+          wipeInProgress = false;
+        });
     }, 100);
   } catch {
     // 忽略调度失败。

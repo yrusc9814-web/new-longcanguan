@@ -49,7 +49,7 @@ import {
   type SyncHttpContext,
 } from './http.js';
 import { createImageSyncQueue, type ImageAssetRef, type ImageSyncQueue } from './images.js';
-import { alignConflictedEntities, convergePushConflicts, pullUntilIdle } from './pull.js';
+import { alignConflictedEntities, pullUntilIdle, type ConvergeOutcome } from './pull.js';
 import { pushOutbox, type PushConflict } from './push.js';
 import { restoreOwnerCloudBackup } from './restore.js';
 import type { BackupConsumers } from '../modules/backup/service.js';
@@ -475,7 +475,7 @@ export class SyncEngine {
         if (pushed.unresolved) throw new SyncNetworkError('云端尚未确认部分操作');
         break;
       }
-      await this.convergeConflicts(database, context.epoch, pushed.conflicts);
+      await this.convergeConflicts(database, context.epoch, pushed.conflicts, pushed.outcomes);
     }
     await pullUntilIdle(
       {
@@ -553,9 +553,8 @@ export class SyncEngine {
     database: DatabaseClient,
     epoch: number,
     conflicts: readonly PushConflict[],
+    outcomes: ReadonlyMap<string, ConvergeOutcome>,
   ): Promise<void> {
-    if (conflicts.length === 0) return;
-    const outcomes = await convergePushConflicts(database, conflicts);
     for (const conflict of conflicts) {
       const outcome = outcomes.get(conflict.opId);
       if (conflict.code === 'PLAN_SLOT_CONFLICT') {

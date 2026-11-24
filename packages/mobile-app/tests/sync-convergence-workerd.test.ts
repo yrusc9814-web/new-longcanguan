@@ -176,9 +176,7 @@ afterAll(async () => {
 });
 
 describe('AC1 端侧收敛联调', () => {
-  // 依赖云端 T-007b 第 1 节「聚合子表先剪枝后插入」：当前云端 recipeChildren 仍先 upsert 再 prune，
-  // 编辑时 stepNo 复用旧编号会撞 UNIQUE(recipeId, stepNo) 并回 400，故先标记未联调。
-  it.skip('菜谱聚合（步骤/标签/餐次/角色）多次编辑往返推送零唯一约束报错且表内容一致', async () => {
+  it('菜谱聚合（步骤/标签/餐次/角色）多次编辑往返推送零唯一约束报错且表内容一致', async () => {
     const member = await addDevice('recipe-member');
     await member.bindMember(await owner.token());
 
