@@ -152,7 +152,7 @@ describe('端侧普通操作：关联子表行 ID 与云端一致', () => {
         await db.query<{ id: string }>('SELECT "id" FROM "MealPlanDiner" ORDER BY "id"'),
       ).toEqual(idColumn(target, 'MealPlanDiner').map((id) => ({ id })));
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -209,7 +209,7 @@ describe('端侧普通操作：关联子表行 ID 与云端一致', () => {
       );
       expect(upsert && upsert.kind === 'upsert' ? upsert.payload.diners : null).toHaveLength(2);
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -232,7 +232,7 @@ describe('端侧普通操作：关联子表行 ID 与云端一致', () => {
         await db.query<{ id: string }>('SELECT "id" FROM "StoreMealType" ORDER BY "id"'),
       ).toEqual(idColumn(target, 'StoreMealType').map((id) => ({ id })));
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -288,7 +288,7 @@ describe('旧载荷兼容', () => {
         `mrd:${String((payload.record as Record<string, unknown>).id)}:${a}`,
       ]);
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -441,7 +441,7 @@ describe('旧载荷兼容', () => {
         ),
       );
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -597,7 +597,7 @@ describe('购物清单长离线基线', () => {
         { id: eggId, completed: 0, quantity: 7 },
       ]);
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -692,7 +692,7 @@ describe('购物清单长离线基线', () => {
         [String(stalePayload.items[0]!.id), eggId].sort(),
       );
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });

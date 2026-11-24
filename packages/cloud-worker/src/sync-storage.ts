@@ -11,6 +11,7 @@ import {
 } from '@dafan/shared/sync';
 
 import { clearReplayHistory, migrateReplay } from './sync-replay';
+import { rememberBaseline, rows } from './sync-replay-support';
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const SNAPSHOT_BYTE_BUDGET = 2_000_000;
@@ -364,7 +365,7 @@ export function acceptSnapshotPage(
   action: 'init' | 'reset',
   upload: SyncSnapshotUpload,
   fingerprint: string,
-): { result: SyncSnapshotUploadResult; changed: boolean } {
+): { result: SyncSnapshotUploadResult; changed: boolean; deletedObjectKeys: string[] } {
   const now = Date.now();
   sql.exec('DELETE FROM sync_uploads WHERE expires_at <= ?', now);
   const { uploadId, page, finalize } = upload;
@@ -393,7 +394,7 @@ export function acceptSnapshotPage(
       session.result_json && page === session.next_page - 1
         ? (JSON.parse(session.result_json) as SyncSnapshotUploadResult)
         : { epoch, seq: 0, complete: false };
-    return { result, changed: false };
+    return { result, changed: false, deletedObjectKeys: [] };
   }
   if (session?.result_json || page !== (session?.next_page ?? 0)) throw new SyncStateConflict();
   if (
@@ -427,10 +428,16 @@ export function acceptSnapshotPage(
     now + SESSION_TTL_MS,
     uploadId,
   );
-  if (!finalize) return { result: { epoch, seq: 0, complete: false }, changed: false };
+  if (!finalize)
+    return { result: { epoch, seq: 0, complete: false }, changed: false, deletedObjectKeys: [] };
 
   replaceLedger(sql, uploadId);
   clearReplayHistory(sql);
+  // 整库替换后立刻为新清单建立基线：后续离线设备按版本做字段级三方合并时
+  // 需要「替换后的服务端状态」，否则首轮合并会退化成整单覆盖。
+  for (const row of rows(sql, 'SELECT * FROM "ShoppingList"')) {
+    rememberBaseline(sql, 'ShoppingList', row);
+  }
   let seq = 0;
   if (action === 'init') {
     // Members that joined before initialization can catch up from their default-only snapshot.
@@ -487,6 +494,17 @@ export function acceptSnapshotPage(
   sql.exec('DELETE FROM sync_snapshots');
   sql.exec('DELETE FROM sync_uploads WHERE id <> ?', uploadId);
   sql.exec('DELETE FROM sync_upload_rows WHERE upload_id = ?', uploadId);
+  // 先取出将随行删除而失去引用的对象键：DO 事务内不能访问 R2，
+  // 由调用方在事务提交后清理，避免留下孤儿对象。
+  const orphanObjectKeys = sql
+    .exec<{ object_key: string }>(
+      `SELECT object_key FROM image_objects WHERE NOT EXISTS (
+    SELECT 1 FROM UploadAsset WHERE deletedAt IS NULL AND sha256 = image_objects.asset_sha256
+      AND (image_objects.variant = 'main' OR thumbnailPath IS NOT NULL)
+  )`,
+    )
+    .toArray()
+    .map(({ object_key }) => object_key);
   sql.exec(`DELETE FROM image_objects WHERE NOT EXISTS (
     SELECT 1 FROM UploadAsset WHERE deletedAt IS NULL AND sha256 = image_objects.asset_sha256
       AND (image_objects.variant = 'main' OR thumbnailPath IS NOT NULL)
@@ -498,5 +516,5 @@ export function acceptSnapshotPage(
     JSON.stringify(result),
     uploadId,
   );
-  return { result, changed: true };
+  return { result, changed: true, deletedObjectKeys: orphanObjectKeys };
 }

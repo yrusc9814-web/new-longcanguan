@@ -81,12 +81,17 @@ function upsertChild(
   changes.capture(table, id);
 }
 
+/**
+ * 排餐/记录内嵌的 `DinerDto` 只是引用：DO 已有该 `Diner` 时**不覆盖**主表字段，
+ * 也不回退其 `version`；只有缺失时才兜底插入。
+ */
 function upsertDiner(sql: SqlStorage, source: RawRow, changes: ChangeCollector): string {
   const id = requireString(source, 'id');
+  const existing = readRow(sql, 'Diner', id);
+  if (existing) return String(existing.id);
   const values = resolveColumns(REPLAY_TABLES.Diner, source);
   values.id = id;
-  if (readRow(sql, 'Diner', id)) updateRow(sql, 'Diner', id, values);
-  else insertRow(sql, 'Diner', values);
+  insertRow(sql, 'Diner', values);
   changes.capture('Diner', id);
   return id;
 }
@@ -131,63 +136,90 @@ function recipeChildren(
   payload: RawRow,
   changes: ChangeCollector,
 ): void {
-  if (Array.isArray(payload.ingredients)) {
-    const keep = new Set<string>();
-    for (const item of payload.ingredients as RawRow[]) {
-      const id = requireString(item, 'id');
-      keep.add(id);
-      upsertChild(sql, 'RecipeIngredient', id, { ...item, recipeId }, changes);
+  // 先剪枝、后写入：同一复合唯一键（如 `RecipeStep(recipeId, stepNo)`）换主键重放时，
+  // 旧行必须先删除，否则插入会撞唯一索引。
+  const replace = (
+    table: SyncEntityName,
+    items: RawRow[],
+    prepare: (item: RawRow) => { id: string; values: RawRow } | null,
+  ) => {
+    const prepared: { id: string; values: RawRow }[] = [];
+    for (const item of items) {
+      const entry = prepare(item);
+      if (entry) prepared.push(entry);
     }
-    pruneChildren(sql, 'RecipeIngredient', 'recipeId', recipeId, keep, changes);
+    // 同一载荷里出现重复主键时只保留最后一条，避免自我冲突。
+    const unique = new Map(prepared.map((entry) => [entry.id, entry] as const));
+    // 剪枝先于写入，也顺带清掉「复合唯一键相同但主键已变」的旧子行。
+    pruneChildren(sql, table, 'recipeId', recipeId, new Set(unique.keys()), changes);
+    for (const entry of unique.values()) {
+      upsertChild(sql, table, entry.id, entry.values, changes);
+    }
+  };
+
+  if (Array.isArray(payload.ingredients)) {
+    replace('RecipeIngredient', payload.ingredients as RawRow[], (item) => ({
+      id: requireString(item, 'id'),
+      values: { ...item, recipeId },
+    }));
   }
   if (Array.isArray(payload.steps)) {
-    const keep = new Set<string>();
-    for (const step of payload.steps as RawRow[]) {
-      const id = requireString(step, 'id');
-      keep.add(id);
-      upsertChild(sql, 'RecipeStep', id, { ...step, recipeId }, changes);
-    }
-    pruneChildren(sql, 'RecipeStep', 'recipeId', recipeId, keep, changes);
+    replace('RecipeStep', payload.steps as RawRow[], (item) => ({
+      id: requireString(item, 'id'),
+      values: { ...item, recipeId },
+    }));
   }
   if (Array.isArray(payload.mealTypes)) {
-    const keep = new Set<string>();
-    for (const mealType of payload.mealTypes as RawRow[]) {
-      const id = requireString(mealType, 'id');
-      keep.add(id);
-      upsertChild(sql, 'RecipeMealType', id, { ...mealType, recipeId }, changes);
-    }
-    pruneChildren(sql, 'RecipeMealType', 'recipeId', recipeId, keep, changes);
+    replace('RecipeMealType', payload.mealTypes as RawRow[], (item) => ({
+      id: requireString(item, 'id'),
+      values: { ...item, recipeId },
+    }));
   }
   if (Array.isArray(payload.mealRoles)) {
-    const keep = new Set<string>();
-    for (const mealRole of payload.mealRoles as RawRow[]) {
-      const id = requireString(mealRole, 'id');
-      keep.add(id);
-      upsertChild(sql, 'RecipeMealRole', id, { ...mealRole, recipeId }, changes);
-    }
-    pruneChildren(sql, 'RecipeMealRole', 'recipeId', recipeId, keep, changes);
+    replace('RecipeMealRole', payload.mealRoles as RawRow[], (item) => ({
+      id: requireString(item, 'id'),
+      values: { ...item, recipeId },
+    }));
   }
   if (Array.isArray(payload.tools)) {
-    const keep = new Set<string>();
-    for (const tool of payload.tools as RawRow[]) {
-      const id = requireString(tool, 'id');
-      keep.add(id);
-      upsertChild(sql, 'RecipeTool', id, { ...tool, recipeId }, changes);
-    }
-    pruneChildren(sql, 'RecipeTool', 'recipeId', recipeId, keep, changes);
+    replace('RecipeTool', payload.tools as RawRow[], (item) => ({
+      id: requireString(item, 'id'),
+      values: { ...item, recipeId },
+    }));
   }
   if (Array.isArray(payload.tags)) {
-    const keep = new Set<string>();
-    for (const tag of payload.tags as RawRow[]) {
-      const relationId = requireString(tag, 'id');
-      keep.add(relationId);
-      const tagRow = tag.tag && typeof tag.tag === 'object' ? (tag.tag as RawRow) : tag;
-      const tagId = tag.tag
+    const tags = payload.tags as RawRow[];
+    // 旧/兼容载荷可能只带 `tagId`：复用既有关联行 ID，否则派生确定性 ID。
+    const resolved = tags.map((tag) => {
+      const tagRow = tag.tag && typeof tag.tag === 'object' ? (tag.tag as RawRow) : null;
+      const tagId = tagRow
         ? upsertTag(sql, { ...tagRow, id: requireString(tagRow, 'id') }, changes)
         : requireString(tag, 'tagId');
-      upsertChild(sql, 'RecipeTag', relationId, { ...tag, recipeId, tagId }, changes);
+      const declared = typeof tag.id === 'string' && tag.id.length > 0 ? tag.id : null;
+      if (declared) return { tag, tagId, relationId: declared };
+      const existing = rows(
+        sql,
+        `SELECT "id" FROM "RecipeTag" WHERE "recipeId" = ? AND "tagId" = ?`,
+        recipeId,
+        tagId,
+      )[0];
+      return {
+        tag,
+        tagId,
+        relationId: existing ? String(existing.id) : derivedId('rt', recipeId, tagId),
+      };
+    });
+    const unique = new Map(resolved.map((entry) => [entry.relationId, entry] as const));
+    pruneChildren(sql, 'RecipeTag', 'recipeId', recipeId, new Set(unique.keys()), changes);
+    for (const entry of unique.values()) {
+      upsertChild(
+        sql,
+        'RecipeTag',
+        entry.relationId,
+        { ...entry.tag, recipeId, tagId: entry.tagId },
+        changes,
+      );
     }
-    pruneChildren(sql, 'RecipeTag', 'recipeId', recipeId, keep, changes);
   }
 }
 

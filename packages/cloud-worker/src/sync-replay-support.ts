@@ -1,4 +1,10 @@
-import type { SyncEntityName, SyncPayload, SyncRejection, SyncRowChange } from '@dafan/shared/sync';
+import type {
+  SyncEntityName,
+  SyncOperation,
+  SyncPayload,
+  SyncRejection,
+  SyncRowChange,
+} from '@dafan/shared/sync';
 
 import { REPLAY_ORDER, REPLAY_TABLES, type ReplayTableMeta } from './sync-replay-tables';
 
@@ -26,11 +32,14 @@ export const QUANTITY_EPSILON = 1e-9;
 /** 冲突拒绝：运输层映射为 `SyncRejection` 并整批回滚。 */
 export class ReplayConflict extends Error {
   readonly rejection: SyncRejection;
+  /** 被拒绝的原操作；运输层在批事务回滚后据此读取权威聚合行。 */
+  readonly operation?: SyncOperation;
 
-  constructor(rejection: SyncRejection, message?: string) {
+  constructor(rejection: SyncRejection, message?: string, operation?: SyncOperation) {
     super(message ?? rejection.code);
     this.name = 'ReplayConflict';
     this.rejection = rejection;
+    this.operation = operation;
   }
 }
 
@@ -267,13 +276,22 @@ export class ChangeCollector {
     this.record(table, id, readRow(this.#sql, table, id));
   }
 
+  /**
+   * 物理删除（`row === null`）永远先于新增/更新落地：删除按子表优先（`REPLAY_ORDER` 逆序），
+   * 写入按父表优先（正序）。端侧在同一事务内顺序复现，就不会出现「旧子行还没删、新子行
+   * 已占用同一复合唯一键」或「父行未插入导致外键失败」。
+   */
   list(): readonly SyncRowChange[] {
     const rank = new Map(REPLAY_ORDER.map((table, index) => [table, index] as const));
-    return [...this.#entries.values()].sort((left, right) => {
-      const delta = (rank.get(left.table) ?? 0) - (rank.get(right.table) ?? 0);
+    const order = (direction: 1 | -1) => (left: SyncRowChange, right: SyncRowChange) => {
+      const delta = ((rank.get(left.table) ?? 0) - (rank.get(right.table) ?? 0)) * direction;
       if (delta !== 0) return delta;
-      return String(left.id).localeCompare(String(right.id));
-    });
+      return String(left.id).localeCompare(String(right.id)) * direction;
+    };
+    const entries = [...this.#entries.values()];
+    const removed = entries.filter((entry) => entry.row === null).sort(order(-1));
+    const written = entries.filter((entry) => entry.row !== null).sort(order(1));
+    return [...removed, ...written];
   }
 }
 

@@ -30,18 +30,26 @@ export type { ReplayResult } from './sync-replay-support';
 
 export function replayOperation(sql: SqlStorage, operation: SyncOperation): ReplayResult {
   const changes = new ChangeCollector(sql);
-  switch (operation.kind) {
-    case 'upsert':
-      return upsertEntity(sql, operation, changes);
-    case 'delete':
-      return deleteEntity(sql, operation, changes);
-    case 'command': {
-      const handler = COMMAND_HANDLERS[operation.commandType];
-      if (!handler) {
-        throw new ReplayValidationError(`未知命令：${String(operation.commandType)}`);
+  try {
+    switch (operation.kind) {
+      case 'upsert':
+        return upsertEntity(sql, operation, changes);
+      case 'delete':
+        return deleteEntity(sql, operation, changes);
+      case 'command': {
+        const handler = COMMAND_HANDLERS[operation.commandType];
+        if (!handler) {
+          throw new ReplayValidationError(`未知命令：${String(operation.commandType)}`);
+        }
+        return handler(sql, operation, operation.payload as Record<string, unknown>, changes);
       }
-      return handler(sql, operation, operation.payload as Record<string, unknown>, changes);
     }
+  } catch (error) {
+    // 运输层在批事务回滚后需要原始操作来读取权威聚合行。
+    if (error instanceof ReplayConflict && !error.operation) {
+      throw new ReplayConflict(error.rejection, error.message, operation);
+    }
+    throw error;
   }
 }
 

@@ -13,6 +13,7 @@ import {
 
 import { hashBearer, hashCredential, requireMember } from './auth';
 import { cloudError } from './http';
+import { authoritativeRejection } from './sync-authority';
 import { ReplayConflict, ReplayValidationError, replayOperation } from './sync-replay';
 import {
   acceptSnapshotPage,
@@ -219,11 +220,15 @@ function push(sql: SqlStorage, epoch: number, memberId: string, body: PushBody) 
       .toArray()[0];
     if (previous) {
       if (previous.member_id !== memberId || previous.fingerprint !== fingerprint) {
-        throw new ReplayConflict({
-          operationId: operation.id,
-          code: 'IDEMPOTENCY_CONFLICT',
-          serverVersion: null,
-        });
+        throw new ReplayConflict(
+          {
+            operationId: operation.id,
+            code: 'IDEMPOTENCY_CONFLICT',
+            serverVersion: null,
+          },
+          undefined,
+          operation,
+        );
       }
       acknowledgements.push({
         operationId: operation.id,
@@ -292,12 +297,18 @@ function isConstraint(error: unknown): boolean {
   );
 }
 
+export interface SyncHooks {
+  /** 事务提交后清理失去引用的 R2 对象；DO 事务内不得访问 R2。 */
+  readonly deleteObjects?: (keys: readonly string[]) => Promise<void>;
+}
+
 export async function serveSync(
   storage: DurableObjectStorage,
   request: Request,
   url: URL,
   route: SyncRoute,
   publish: Publish,
+  hooks: SyncHooks = {},
 ): Promise<Response> {
   const { sql } = storage;
   const tokenHash = await hashBearer(request.headers.get('authorization'));
@@ -373,9 +384,14 @@ export async function serveSync(
     }
     if (!upload) throw new InvalidSyncData();
     const action = route === '/api/sync/init-upload' ? 'init' : 'reset';
-    const { result, changed } = storage.transactionSync(() =>
+    const { result, changed, deletedObjectKeys } = storage.transactionSync(() =>
       acceptSnapshotPage(sql, member.id, epoch, action, upload, fingerprint),
     );
+    if (deletedObjectKeys.length && hooks.deleteObjects) {
+      // 事务已提交：此处是唯一可以安全访问 R2 的时机。删除失败不回滚账本，
+      // 下次快照替换会重新算出同样的孤儿键并重试。
+      await hooks.deleteObjects(deletedObjectKeys).catch(() => undefined);
+    }
     if (changed)
       publish(
         action === 'reset'
@@ -385,12 +401,17 @@ export async function serveSync(
     return Response.json(result, { headers: noStore });
   } catch (error) {
     if (error instanceof ReplayConflict) {
+      // 批事务已回滚：此刻读到的就是「本条操作从未发生」的权威状态。
+      const rejection =
+        error.operation !== undefined
+          ? authoritativeRejection(sql, error.operation, error.rejection)
+          : error.rejection;
       return Response.json(
         {
-          ...error.rejection,
+          ...rejection,
           acceptedOperationIds: [],
           acknowledgements: [],
-          rejected: [error.rejection],
+          rejected: [rejection],
         },
         { status: 409, headers: noStore },
       );

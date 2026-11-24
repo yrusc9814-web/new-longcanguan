@@ -19,6 +19,7 @@ import {
   roundQuantity,
   rowVersion,
   rows,
+  rememberBaseline,
   summarizeBatchMeta,
   summarizeQuantity,
   updateRow,
@@ -580,12 +581,14 @@ function replaceRecordChildren(
   executedAt: string,
   changes: ChangeCollector,
 ): void {
+  // 旧子行先物理删除并记录 `row: null`，否则他端会残留幽灵条目。
   for (const child of rows(
     sql,
     `SELECT "id" FROM "MealRecordItem" WHERE "mealRecordId" = ?`,
     recordId,
   )) {
     sql.exec(`DELETE FROM "MealRecordItem" WHERE "id" = ?`, child.id);
+    changes.record('MealRecordItem', child.id as string, null);
   }
   for (const child of rows(
     sql,
@@ -593,6 +596,7 @@ function replaceRecordChildren(
     recordId,
   )) {
     sql.exec(`DELETE FROM "MealRecordDiner" WHERE "id" = ?`, child.id);
+    changes.record('MealRecordDiner', child.id as string, null);
   }
   for (const [index, itemId] of itemIds.entries()) {
     const source = itemRows[index];
@@ -676,6 +680,25 @@ export function completePlan(
       });
     }
     if (recordRevived) {
+      // 复活只允许针对端侧已软删、未确认且版本未变的自动草稿；
+      // 与端侧 `completePlan` 的乐观锁口径一致，禁止覆盖他人已确认/已改动的记录。
+      const expected = Number(record.version) - 1;
+      const current = rowVersion(existingRecord, 'MealRecord');
+      if (
+        existingRecord.deletedAt === null ||
+        existingRecord.status !== 'DRAFT' ||
+        current !== expected
+      ) {
+        throw new ReplayConflict(
+          {
+            operationId: operation.id,
+            code: 'VERSION_CONFLICT',
+            serverVersion: current,
+            winner: existingRecord as never,
+          },
+          'PLAN_COMPLETE 复活只能作用于版本未变的未确认自动记录',
+        );
+      }
       writeRecordRow(
         sql,
         record,
@@ -768,6 +791,21 @@ export function uncompletePlan(
     const record = readRow(sql, 'MealRecord', recordId);
     if (!record) {
       throw new ReplayValidationError(`PLAN_UNCOMPLETE 引用的记录不存在: ${recordId}`);
+    }
+    // 与端侧同口径：只有「未改动过」的自动草稿允许被撤销；
+    // 服务端已确认或已被他人改动时必须拒绝，严禁误删已确认记录。
+    const expected = requireNumber(removed, 'version') - 1;
+    const current = rowVersion(record, 'MealRecord');
+    if (record.status !== 'DRAFT' || record.deletedAt !== null || current !== expected) {
+      throw new ReplayConflict(
+        {
+          operationId: operation.id,
+          code: 'VERSION_CONFLICT',
+          serverVersion: current,
+          winner: record as never,
+        },
+        'PLAN_UNCOMPLETE 只能撤销未确认且版本未变的自动记录',
+      );
     }
     updateRow(sql, 'MealRecord', recordId, {
       deletedAt: requireString(removed, 'deletedAt'),
@@ -954,23 +992,28 @@ export function shoppingCheckin(
     const ingredientId = requireString(fact, 'ingredientId');
     const kind = requireString(fact, 'kind');
     const createdIngredient = fact.createdIngredient === true;
-    const ingredient = readRow(sql, 'Ingredient', ingredientId);
+    const current = readRow(sql, 'Ingredient', ingredientId);
+    const unit = requireString(fact, 'ingredientUnit');
+    let expectedVersion: number;
+
     if (createdIngredient) {
-      if (ingredient) {
+      if (current) {
         throw new ReplayConflict({
           operationId: operation.id,
           code: 'VERSION_CONFLICT',
-          serverVersion: rowVersion(ingredient, 'Ingredient'),
-          winner: ingredient as never,
+          serverVersion: rowVersion(current, 'Ingredient'),
+          ingredientId,
+          winner: current as never,
         });
       }
+      expectedVersion = requireNumber(fact, 'ingredientVersion');
       insertRow(sql, 'Ingredient', {
         id: ingredientId,
         name: fact.ingredientNameSnapshot,
         imagePath: null,
         category: fact.ingredientCategory ?? null,
         quantity: fact.ingredientQuantity,
-        unit: fact.ingredientUnit,
+        unit,
         purchaseDate,
         expiryDate: null,
         location: null,
@@ -978,35 +1021,29 @@ export function shoppingCheckin(
         maxStock: null,
         opened: 0,
         notes: null,
-        version: fact.ingredientVersion,
+        version: expectedVersion,
         deletedAt: null,
         createdAt: executedAt,
         updatedAt: executedAt,
       });
       changes.capture('Ingredient', ingredientId);
     } else {
-      if (!ingredient) {
+      if (!current) {
         throw new ReplayValidationError(`入库食材不存在: ${ingredientId}`);
       }
-      const base = requireNumber(fact, 'ingredientBaseVersion');
-      if (rowVersion(ingredient, 'Ingredient') !== base) {
+      expectedVersion = requireNumber(fact, 'ingredientBaseVersion');
+      if (rowVersion(current, 'Ingredient') !== expectedVersion) {
         throw new ReplayConflict({
           operationId: operation.id,
           code: 'VERSION_CONFLICT',
-          serverVersion: rowVersion(ingredient, 'Ingredient'),
+          serverVersion: rowVersion(current, 'Ingredient'),
           ingredientId,
-          winner: ingredient as never,
+          winner: current as never,
         });
       }
-      updateRow(sql, 'Ingredient', ingredientId, {
-        quantity: fact.ingredientQuantity,
-        category: fact.ingredientCategory ?? ingredient.category ?? null,
-        version: fact.ingredientVersion,
-        updatedAt: executedAt,
-      });
-      changes.capture('Ingredient', ingredientId);
     }
 
+    // 先写新批次，再与端侧同口径重算汇总：基线单位可能在空库存换单位时已经改变。
     const batchId = requireString(fact, 'batchId');
     insertRow(sql, 'InventoryBatch', {
       id: batchId,
@@ -1044,6 +1081,37 @@ export function shoppingCheckin(
       updatedAt: executedAt,
     });
     changes.capture('InventoryLog', logId);
+
+    const batches = activeBatches(sql, ingredientId);
+    const summary = summarizeBatchMeta(batches);
+    const total = summarizeQuantity(batches, unit);
+    const nextVersion = requireNumber(fact, 'ingredientVersion');
+    const updated = sql.exec(
+      `UPDATE "Ingredient" SET "unit" = ?, "quantity" = ?, "purchaseDate" = ?, "expiryDate" = ?,
+         "location" = ?, "category" = ?, "version" = ?, "updatedAt" = ?
+       WHERE "id" = ? AND "version" = ? AND "deletedAt" IS NULL`,
+      unit,
+      total,
+      summary.purchaseDate ?? (createdIngredient ? purchaseDate : (current?.purchaseDate ?? null)),
+      summary.expiryDate ?? (createdIngredient ? null : (current?.expiryDate ?? null)),
+      summary.location ?? (createdIngredient ? null : (current?.location ?? null)),
+      fact.ingredientCategory ?? (createdIngredient ? null : (current?.category ?? null)),
+      nextVersion,
+      executedAt,
+      ingredientId,
+      expectedVersion,
+    );
+    if (updated.rowsWritten < 1) {
+      const latest = readRow(sql, 'Ingredient', ingredientId);
+      throw new ReplayConflict({
+        operationId: operation.id,
+        code: 'VERSION_CONFLICT',
+        serverVersion: rowVersion(latest, 'Ingredient'),
+        ingredientId,
+        winner: (latest ?? {}) as never,
+      });
+    }
+    changes.capture('Ingredient', ingredientId);
   }
 
   const itemIds = Array.isArray(request.itemIds) ? (request.itemIds as string[]) : [];
@@ -1064,6 +1132,8 @@ export function shoppingCheckin(
   }
   updateRow(sql, 'ShoppingList', listId, { version: listVersion, updatedAt: executedAt });
   changes.capture('ShoppingList', listId);
+  // 落库后补齐基线：后续离线设备以该版本为基线做字段级三方合并。
+  rememberBaseline(sql, 'ShoppingList', readRow(sql, 'ShoppingList', listId));
 
   insertRow(sql, 'ShoppingCheckinOperation', {
     id: operationId,

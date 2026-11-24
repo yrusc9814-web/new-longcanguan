@@ -220,6 +220,24 @@ export function deleteEntity(
     if (meta.versioned) values.version = nextVersion;
     updateRow(sql, entity, operation.entityId, values);
     changes.capture(entity, operation.entityId);
+    // 软删聚合根必须与端侧同语义级联软删子行（端侧 `deleteIngredient` 同事务
+    // 软删全部未删除批次），否则他端会留下幽灵批次继续计入库存。
+    if (entity === 'Ingredient') {
+      for (const batch of rows(
+        sql,
+        `SELECT "id","version" FROM "InventoryBatch"
+          WHERE "ingredientId" = ? AND "deletedAt" IS NULL`,
+        operation.entityId,
+      )) {
+        const batchId = String(batch.id);
+        updateRow(sql, 'InventoryBatch', batchId, {
+          deletedAt: operation.deletedAt,
+          updatedAt: operation.deletedAt,
+          version: Number(batch.version ?? 1) + 1,
+        });
+        changes.capture('InventoryBatch', batchId);
+      }
+    }
   } else {
     deleteEntityChildren(sql, entity, String(operation.entityId), changes);
     sql.exec(`DELETE FROM "${entity}" WHERE "id" = ?`, operation.entityId);

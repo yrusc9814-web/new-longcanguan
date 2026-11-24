@@ -93,8 +93,18 @@ export class HouseholdHub extends DurableObject<Env> {
     if (isSyncRoute(pathname)) {
       const expected = SYNC_ROUTES[pathname];
       if (method !== expected) return methodNotAllowed(method, pathname, [expected]);
-      return serveSync(this.ctx.storage, request, url, pathname, (frame, source) =>
-        this.#publish(frame, source),
+      return serveSync(
+        this.ctx.storage,
+        request,
+        url,
+        pathname,
+        (frame, source) => this.#publish(frame, source),
+        {
+          deleteObjects: async (keys) => {
+            if (!keys.length) return;
+            await this.env.PRIVATE_BUCKET.delete([...keys]);
+          },
+        },
       );
     }
 

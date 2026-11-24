@@ -453,6 +453,37 @@ export const REPLAY_TABLES: Readonly<Record<SyncEntityName, ReplayTableMeta>> = 
   },
 };
 
+/** 聚合根的关联子表（父列名）。删除级联与权威快照共用同一份关系表。 */
+export const ENTITY_CHILDREN: Partial<
+  Record<SyncEntityName, ReadonlyArray<readonly [SyncEntityName, string]>>
+> = {
+  Ingredient: [
+    ['InventoryBatch', 'ingredientId'],
+    ['InventoryLog', 'ingredientId'],
+  ],
+  Recipe: [
+    ['RecipeIngredient', 'recipeId'],
+    ['RecipeMealRole', 'recipeId'],
+    ['RecipeMealType', 'recipeId'],
+    ['RecipeStep', 'recipeId'],
+    ['RecipeTag', 'recipeId'],
+    ['RecipeTool', 'recipeId'],
+  ],
+  Store: [
+    ['StoreMealType', 'storeId'],
+    ['StoreMenuItem', 'storeId'],
+  ],
+  MealPlan: [
+    ['MealPlanDiner', 'mealPlanId'],
+    ['MealPlanItem', 'mealPlanId'],
+  ],
+  MealRecord: [
+    ['MealRecordDiner', 'mealRecordId'],
+    ['MealRecordItem', 'mealRecordId'],
+  ],
+  ShoppingList: [['ShoppingListItem', 'shoppingListId']],
+};
+
 /** 写入顺序：父表在前，避免外键瞬时违反。 */
 export const REPLAY_ORDER: readonly SyncEntityName[] = [
   'Settings',

@@ -7,13 +7,14 @@
  */
 
 import { HOUSEHOLD_EPOCH_HEADER } from '@dafan/shared/sync';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   auth,
   BOOTSTRAP_SECRET,
   bytes,
   call,
+  closeAllSockets,
   connect,
   DEFAULT_SOURCE,
   digest,
@@ -48,6 +49,11 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetHousehold(runtime);
+});
+
+// WebSocket 关闭握手是异步的：显式等待，避免句柄跨用例残留导致偶发超时。
+afterEach(async () => {
+  await closeAllSockets();
 });
 
 function postJson(path: string, body: unknown, headers: Record<string, string> = {}) {
@@ -531,6 +537,7 @@ describe('票据与连接在辅助函数内可用', () => {
     const issued = await ticket(runtime, owner.token);
     const socket = await connect(runtime, issued.ticket);
     socket.close();
+    await socket.waitForClose();
   });
 
   it('keeps the epoch header contract for uploads', async () => {

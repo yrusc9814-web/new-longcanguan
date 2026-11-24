@@ -75,6 +75,14 @@ function versionConflict(operationId: string, serverList: RawRow): ReplayConflic
   });
 }
 
+function itemFacts(items: unknown): RawRow[] {
+  if (!Array.isArray(items)) return [];
+  return (items as RawRow[]).map((item) => ({
+    ...item,
+    completed: typeof item.completed === 'boolean' ? Number(item.completed) : item.completed,
+  }));
+}
+
 export function upsertShoppingList(
   sql: SqlStorage,
   operation: Extract<SyncOperation, { kind: 'upsert' }>,
@@ -86,17 +94,15 @@ export function upsertShoppingList(
   // 每次 upsert 前保存基线，供后续离线合并精确还原「客户端所见版本」。
   rememberBaseline(sql, 'ShoppingList', current);
 
-  const payloadItems = Array.isArray(payload.items)
-    ? (payload.items as RawRow[]).map((item) => ({
-        ...item,
-        completed: typeof item.completed === 'boolean' ? Number(item.completed) : item.completed,
-      }))
-    : [];
+  const payloadItems = itemFacts(payload.items);
+  // 端侧显式携带的「本次操作前完整条目数组」：多次串行本地修改时，
+  // 本地 version 会等于云端 version，但真正的基线是这份快照而非服务端历史。
+  const explicitBase = Array.isArray(payload.baseItems) ? itemFacts(payload.baseItems) : null;
   const baseVersion = operation.baseVersion;
   const currentVersion = rowVersion(current, 'ShoppingList');
 
-  if (current && baseVersion !== null && currentVersion > baseVersion) {
-    return mergeShoppingList(sql, operation, payload, payloadItems, current, changes);
+  if (current && baseVersion !== null && (currentVersion > baseVersion || explicitBase)) {
+    return mergeShoppingList(sql, operation, payload, payloadItems, explicitBase, current, changes);
   }
   if (baseVersion !== null) {
     if (!current) {
@@ -131,6 +137,7 @@ function mergeShoppingList(
   operation: Extract<SyncOperation, { kind: 'upsert' }>,
   payload: RawRow,
   payloadItems: readonly RawRow[],
+  explicitBase: readonly RawRow[] | null,
   serverList: RawRow,
   changes: ChangeCollector,
 ): ReplayResult {
@@ -138,9 +145,9 @@ function mergeShoppingList(
   const baseVersion = operation.baseVersion as number;
   const baseline = readBaseline(sql, 'ShoppingList', listId, baseVersion);
   const serverItems = shoppingItems(sql, listId);
-  const baseItems = new Map(
-    (baseline?.items ?? []).map((item) => [String(item.id), item] as const),
-  );
+  // 客户端显式快照就是「本次操作前本地所见」，优先于服务端按版本记录的历史基线。
+  const baseSource = explicitBase ?? baseline?.items ?? [];
+  const baseItems = new Map(baseSource.map((item) => [String(item.id), item] as const));
   const serverById = new Map(serverItems.map((item) => [String(item.id), item] as const));
   const clientById = new Map(payloadItems.map((item) => [String(item.id), item] as const));
 

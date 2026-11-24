@@ -282,7 +282,7 @@ describe('27 表与命令注册', () => {
       await compare(target, db, ['KitchenTool']);
       expect(ledgerRows(target, 'KitchenTool', ['version'])).toEqual([{ version: 1 }]);
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -316,7 +316,7 @@ describe('食材命令', () => {
       expect(order.indexOf('InventoryBatch')).toBeLessThan(order.indexOf('InventoryLog'));
       for (const change of result.changes) expect(change.row).not.toBeNull();
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -376,7 +376,7 @@ describe('食材命令', () => {
       expect(ledgerRows(target, 'Ingredient', REPLAY_TABLES.Ingredient.columns)).toEqual(before);
       expect(count(target, 'InventoryLog')).toBe(logsBefore);
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -403,7 +403,7 @@ describe('食材命令', () => {
       await compare(target, db, ['Ingredient', 'InventoryBatch', 'InventoryLog']);
       expect(count(target, 'InventoryLog')).toBe(3);
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -438,7 +438,7 @@ describe('食材命令', () => {
       await replayer.sync(db);
       await compare(target, db, ['Ingredient', 'InventoryBatch', 'InventoryLog']);
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -491,7 +491,7 @@ describe('排餐 / 记录命令', () => {
       await compare(target, db, ['MealPlan', 'MealPlanItem', 'MealRecord', 'MealRecordItem']);
       expect(ledgerRows(target, 'MealPlan', ['status'])).toEqual([{ status: 'COMPLETED' }]);
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -518,7 +518,7 @@ describe('排餐 / 记录命令', () => {
       expect(proof.planUncompleteProof).toContain('PLAN_UNCOMPLETE');
       expect(proof.deletedAt).not.toBeNull();
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -548,7 +548,7 @@ describe('排餐 / 记录命令', () => {
       expect(record.deletedAt).not.toBeNull();
       expect(record.sourceMealPlanId).toBeNull();
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -607,7 +607,7 @@ describe('排餐 / 记录命令', () => {
       expect(count(target, 'InventoryLog')).toBe(0);
       expect(count(target, 'Tag')).toBe(1);
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -652,7 +652,7 @@ describe('购物清单', () => {
       expect(count(target, 'InventoryLog')).toBe(1);
       expect(count(target, 'ShoppingListItem')).toBe(0);
     } finally {
-      db.close();
+      await db.close();
       target.close();
     }
   });
@@ -1239,7 +1239,7 @@ describe('端侧同一事务复现', () => {
       const violations = await replica.query<Record<string, unknown>>('PRAGMA foreign_key_check');
       expect(violations).toEqual([]);
     } finally {
-      db.close();
+      await db.close();
       target.close();
       replica.close();
     }

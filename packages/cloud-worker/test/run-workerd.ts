@@ -339,7 +339,8 @@ export async function startWorkerd(
       await mf?.dispose();
     } finally {
       releaseWorkerdPath();
-      await rm(tempDir, { recursive: true, force: true });
+      // Windows 上 workerd 句柄释放可能滞后：失败时重试而不是让整轮测试挂掉。
+      await rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   };
 
