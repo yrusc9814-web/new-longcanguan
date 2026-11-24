@@ -267,50 +267,133 @@ describe('AC1 端侧收敛联调', () => {
     await noOutbox(member.database);
   }, 60_000);
 
-  it('成员连续离线两次修改购物单后推送：无发件箱残留、双端一致、不误删馆主新增', async () => {
-    const member = await addDevice('conflict-member');
+  it('双端交替两轮：新增/物理删除/勾选各自连推两步零 409、已删条目不复活、27 表逐列一致', async () => {
+    const member = await addDevice('shopping-member');
     await member.bindMember(await owner.token());
     const shopping = `/shopping-lists/${SHOPPING_DEFAULT_LIST_ID}`;
 
+    const pushCalls = (device: Device) =>
+      device.requests.filter(({ path }) => path === '/api/sync/push');
+    const pushFailures = (device: Device) =>
+      device.requests.filter(({ path, status }) => path === '/api/sync/push' && status >= 400);
+    const itemsOf = async (database: DatabaseHandle) =>
+      (
+        await database.query<{ ingredientNameSnapshot: string; completed: number | boolean }>(
+          'SELECT "ingredientNameSnapshot", "completed" FROM "ShoppingListItem" ORDER BY "ingredientNameSnapshot"',
+        )
+      )
+        .map(
+          ({ ingredientNameSnapshot, completed }) =>
+            `${ingredientNameSnapshot}:${completed === true || Number(completed) === 1 ? 1 : 0}`,
+        )
+        .sort();
+    const itemIds = async (database: DatabaseHandle) =>
+      (
+        await database.query<{ id: string }>('SELECT "id" FROM "ShoppingListItem"')
+      ).map(({ id }) => id);
+
+    // 停机后手动驱动，避免后台 WS 广播插入额外推送，保证每次显式同步恰好一次 push。
     owner.engine.stop();
     member.engine.stop();
-    const { version } = await owner.local<{ version: number }>(shopping);
-    await owner.local(`${shopping}/items`, 'POST', { version, ingredientName: '馆主买肉' });
-    await member.local(`${shopping}/items`, 'POST', { version, ingredientName: '成员买菜' });
-    const second = await member.local<{ version: number }>(shopping);
-    await member.local(`${shopping}/items`, 'POST', {
-      version: second.version,
-      ingredientName: '成员买蛋',
-    });
 
-    const first = await owner.local<{
-      version: number;
-      items: { id: string; ingredientName: string }[];
-    }>(shopping);
-    const ownerItem = first.items.find((item) => item.ingredientName === '馆主买肉')!;
-    await owner.local(`/shopping-list-items/${ownerItem.id}`, 'PUT', {
-      version: first.version,
+    // 基础事实：双端同步到同一份三条条目。
+    let version = (await owner.local<{ version: number }>(shopping)).version;
+    const created: Record<string, string> = {};
+    for (const name of ['西红柿', '鸡蛋', '豆腐']) {
+      const list = await owner.local<{
+        version: number;
+        items: { id: string; ingredientName: string }[];
+      }>(`${shopping}/items`, 'POST', { version, ingredientName: name });
+      version = list.version;
+      created[name] = list.items.find((item) => item.ingredientName === name)!.id;
+    }
+    const baseVersion = version;
+    await owner.engine.syncOnce();
+    await member.engine.pullNow();
+    await noOutbox(owner.database);
+    await noOutbox(member.database);
+    await expectAligned(owner.database, member.database);
+    expect(await itemsOf(member.database)).toEqual(['西红柿:0', '鸡蛋:0', '豆腐:0'].sort());
+    expect((await member.local<{ version: number }>(shopping)).version).toBe(baseVersion);
+
+    // 第 1 轮：两端离线各勾选不同条目，先推馆主，再推成员。
+    await owner.local(`/shopping-list-items/${created['鸡蛋']}`, 'PUT', {
+      version: baseVersion,
       completed: true,
     });
     await owner.engine.syncOnce();
-    // 馆主的两次改动已经上云；成员先跳过整个待推聚合，再连推两次本地操作。
-    await member.engine.pullNow();
+    expect(pushFailures(owner)).toEqual([]);
+
+    await member.local(`/shopping-list-items/${created['西红柿']}`, 'PUT', {
+      version: baseVersion,
+      completed: true,
+    });
     await member.engine.syncOnce();
-    expect(member.requests.filter(({ path }) => path === '/api/sync/push').length).toBeGreaterThan(
-      0,
-    );
-    await owner.engine.pullNow();
+    expect(pushFailures(member)).toEqual([]);
+    expect(await itemsOf(member.database)).toEqual(['西红柿:1', '鸡蛋:1', '豆腐:0'].sort());
+
+    // 第 2 轮：馆主物理删除豆腐并推送；成员尚未拉到删除，继续离线新增，
+    // 其载荷仍完整携带已删条目（item 与 baseItems 都含豆腐）。
+    const ownerView = await owner.local<{ version: number }>(shopping);
+    await owner.local(`/shopping-list-items/${created['豆腐']}?version=${ownerView.version}`, 'DELETE');
     await owner.engine.syncOnce();
+    expect(pushFailures(owner)).toEqual([]);
+
+    const memberView = await member.local<{
+      version: number;
+      items: { id: string }[];
+    }>(shopping);
+    expect(memberView.items.map(({ id }) => id)).toContain(created['豆腐']);
+    await member.local(`${shopping}/items`, 'POST', {
+      version: memberView.version,
+      ingredientName: '成员买菜',
+    });
+    const pending = await member.database.query<{ payloadJson: string }>(
+      'SELECT "payloadJson" FROM sync_outbox ORDER BY rowid',
+    );
+    expect(pending).toHaveLength(1);
+    const staged = JSON.parse(pending[0]!.payloadJson) as {
+      items: { ingredientNameSnapshot: string }[];
+      baseItems: { ingredientNameSnapshot: string }[];
+    };
+    expect(staged.items.map(({ ingredientNameSnapshot }) => ingredientNameSnapshot)).toContain(
+      '豆腐',
+    );
+    expect(staged.baseItems.map(({ ingredientNameSnapshot }) => ingredientNameSnapshot)).toContain(
+      '豆腐',
+    );
+    await member.engine.syncOnce();
+    expect(pushFailures(member)).toEqual([]);
+
+    // 双向补齐：两端各自拉取并再同步一次，验证最终收敛与发件箱清零。
+    await owner.engine.pullNow();
     await member.engine.pullNow();
+    await owner.engine.syncOnce();
+    await member.engine.syncOnce();
 
     await noOutbox(owner.database);
     await noOutbox(member.database);
     await expectAligned(owner.database, member.database);
-    const names = (await rows(member.database, 'ShoppingListItem')).map(
-      (row) => row.ingredientNameSnapshot,
+    expect([...owner.requests, ...member.requests].filter(({ status }) => status === 409)).toEqual(
+      [],
     );
-    expect(names).toContain('馆主买肉');
-    expect(new Set(names).size).toBe(names.length);
+    // 双端各自连续多次真实推送，全部 200，无一次 409。
+    expect(SYNC_SNAPSHOT_TABLES).toHaveLength(27);
+    expect(pushCalls(owner).length).toBeGreaterThanOrEqual(2);
+    expect(pushCalls(member).length).toBeGreaterThanOrEqual(2);
+    expect(pushCalls(owner).every(({ status }) => status === 200)).toBe(true);
+    expect(pushCalls(member).every(({ status }) => status === 200)).toBe(true);
+
+    const expected = ['西红柿:1', '鸡蛋:1', '成员买菜:0'].sort();
+    expect(await itemsOf(owner.database)).toEqual(expected);
+    expect(await itemsOf(member.database)).toEqual(expected);
+    expect(await itemIds(owner.database)).not.toContain(created['豆腐']);
+    expect(await itemIds(member.database)).not.toContain(created['豆腐']);
+    const ownerVersion = (await owner.local<{ version: number }>(shopping)).version;
+    expect(ownerVersion).toBe(8);
+    expect((await member.local<{ version: number }>(shopping)).version).toBe(ownerVersion);
+    expect(owner.failures).toEqual([]);
+    expect(member.failures).toEqual([]);
   }, 60_000);
 
   it('馆主撤权后成员设备停机，不再推送', async () => {
