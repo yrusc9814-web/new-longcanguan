@@ -156,39 +156,51 @@ beforeEach(async () => {
   gateState.pinUnlocked = false;
 });
 
+// 冷启动用例还要承担 bootstrap 模块图的首次 transform 与两次擦除：
+// 单文件实测约 1.2s，与其它测试文件同轮并发时 4~5.3s，默认 5000ms 预算不足。
+const COLD_START_TIMEOUT_MS = 15_000;
+
 describe('冷启动补完物理擦除', () => {
-  it('锁定状态下先擦除再解锁，然后才打开全新库', async () => {
-    const bootstrap = await loadBootstrap();
-    const response = await bootstrap.localApi.handle(health());
+  it(
+    '锁定状态下先擦除再解锁，然后才打开全新库',
+    async () => {
+      const bootstrap = await loadBootstrap();
+      const response = await bootstrap.localApi.handle(health());
 
-    expect(response.status).toBe(200);
-    const unlockIndex = events.findIndex(
-      (event) => event.startsWith('gate:write') && event.includes('"lockedPendingWipe":false'),
-    );
-    expect(events.indexOf('purge')).toBeGreaterThanOrEqual(0);
-    expect(events.indexOf('purge')).toBeLessThan(unlockIndex);
-    expect(events.indexOf('webview:clear')).toBeLessThan(unlockIndex);
-    expect(unlockIndex).toBeLessThan(events.indexOf('db:open'));
-    // 两次删除都发生在解锁之前。
-    expect(events.filter((event) => event === 'purge')).toHaveLength(2);
-    expect(gateState.lockedPendingWipe).toBe(false);
-    expect(events).toContain('backup:recover');
-  });
+      expect(response.status).toBe(200);
+      const unlockIndex = events.findIndex(
+        (event) => event.startsWith('gate:write') && event.includes('"lockedPendingWipe":false'),
+      );
+      expect(events.indexOf('purge')).toBeGreaterThanOrEqual(0);
+      expect(events.indexOf('purge')).toBeLessThan(unlockIndex);
+      expect(events.indexOf('webview:clear')).toBeLessThan(unlockIndex);
+      expect(unlockIndex).toBeLessThan(events.indexOf('db:open'));
+      // 两次删除都发生在解锁之前。
+      expect(events.filter((event) => event === 'purge')).toHaveLength(2);
+      expect(gateState.lockedPendingWipe).toBe(false);
+      expect(events).toContain('backup:recover');
+    },
+    COLD_START_TIMEOUT_MS,
+  );
 
-  it('擦除不完整时保持锁定且从不打开旧库', async () => {
-    purge.complete = false;
-    const bootstrap = await loadBootstrap();
+  it(
+    '擦除不完整时保持锁定且从不打开旧库',
+    async () => {
+      purge.complete = false;
+      const bootstrap = await loadBootstrap();
 
-    const response = await bootstrap.localApi.handle(health());
+      const response = await bootstrap.localApi.handle(health());
 
-    // 补完失败 → 路由按持久门禁返回 403 MEMBER_REVOKED，绝不回落到旧库。
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({ error: { code: 'MEMBER_REVOKED' } });
-    expect(gateState.lockedPendingWipe).toBe(true);
-    expect(unlockedWrite()).toBe(false);
-    expect(events).not.toContain('db:open');
-    expect(events).not.toContain('backup:recover');
-  });
+      // 补完失败 → 路由按持久门禁返回 403 MEMBER_REVOKED，绝不回落到旧库。
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: 'MEMBER_REVOKED' } });
+      expect(gateState.lockedPendingWipe).toBe(true);
+      expect(unlockedWrite()).toBe(false);
+      expect(events).not.toContain('db:open');
+      expect(events).not.toContain('backup:recover');
+    },
+    COLD_START_TIMEOUT_MS,
+  );
 
   it('未处于锁定状态时跳过补完，直接打开库', async () => {
     gateState.lockedPendingWipe = false;

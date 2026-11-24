@@ -18,6 +18,9 @@ export default defineConfig({
     include: ['test/**/*.test.ts'],
     environment: 'node',
     pool: 'forks',
-    maxWorkers: 2,
+    // 每个 worker 都会拉起独立的 workerd 进程（Miniflare + esbuild bundle）。
+    // 两个并发时在 Windows 出现过 fork 意外退出（Worker exited unexpectedly），
+    // 而 workerd 用例本身已是串行节奏，因此收敛到单 worker；保留 forks 的进程级隔离。
+    maxWorkers: 1,
   },
 });
