@@ -238,10 +238,117 @@ export async function tableColumns(
 }
 
 /**
+ * 复合自然唯一键：云端主键与本地随机主键不同但业务键相同时，必须先剪掉本地旧行，
+ * 否则 `ON CONFLICT ("id")` 之外还会撞上这些唯一索引（见 shared 的 schema 索引）。
+ */
+const NATURAL_KEYS: Readonly<Record<string, readonly (readonly string[])[]>> = {
+  RecipeStep: [['recipeId', 'stepNo']],
+  RecipeMealType: [['recipeId', 'mealType']],
+  RecipeMealRole: [['recipeId', 'mealRole']],
+  RecipeTag: [['recipeId', 'tagId']],
+  RecipeTool: [['recipeId', 'toolId']],
+  StoreMealType: [['storeId', 'mealType']],
+  MealPlanDiner: [['mealPlanId', 'dinerId']],
+  MealRecordDiner: [['mealRecordId', 'dinerId']],
+};
+
+/** 删除本地同自然键、不同主键的旧行（云端胜出主键为准）。 */
+async function clearNaturalKeyConflicts(
+  tx: WriteTransaction,
+  table: string,
+  row: Record<string, unknown>,
+  canonicalId: SqlValue,
+): Promise<void> {
+  for (const key of NATURAL_KEYS[table] ?? []) {
+    const values = key.map((column) => normalizeValue(row[column]));
+    if (values.some((value) => value === null)) continue;
+    const where = key.map((column) => `"${column}" = ?`).join(' AND ');
+    const stale = await tx.query<{ id: string }>(
+      `SELECT "id" FROM "${table}" WHERE ${where} AND "id" <> ?`,
+      [...values, canonicalId],
+    );
+    for (const duplicate of stale) {
+      await tx.run(`DELETE FROM "${table}" WHERE "id" = ?`, [duplicate.id]);
+    }
+  }
+}
+
+/**
+ * `Tag(name,type)` 自然唯一键对齐：云端胜出 ID 与本地旧 ID 不同时，先把
+ * `RecipeTag.tagId` 引用整体迁移到胜出 ID（同菜谱已指向胜出 ID 的重复关联行先删），
+ * 再移除本地旧 Tag 行，避免 `UNIQUE constraint failed: Tag.name, Tag.type`。
+ */
+async function alignTagNaturalKey(
+  tx: WriteTransaction,
+  row: Record<string, unknown>,
+  canonicalId: SqlValue,
+): Promise<void> {
+  if (typeof row.name !== 'string') return;
+  // `Tag_name_type_key` 不含 deletedAt：软删行同样占用自然键，本地同键旧行必须让位，
+  // 引用整体迁移到云端胜出 ID（指向软删行的引用合法，与云端事实一致）。
+  const type = typeof row.type === 'string' ? row.type : 'GENERAL';
+  const stale = await tx.query<{ id: string }>(
+    `SELECT "id" FROM "Tag" WHERE "name" = ? AND "type" = ? AND "id" <> ?`,
+    [row.name, type, canonicalId],
+  );
+  for (const duplicate of stale) {
+    await tx.run(
+      `DELETE FROM "RecipeTag"
+        WHERE "tagId" = ?
+          AND "recipeId" IN (SELECT "recipeId" FROM "RecipeTag" WHERE "tagId" = ?)`,
+      [duplicate.id, canonicalId],
+    );
+    await tx.run(`UPDATE "RecipeTag" SET "tagId" = ? WHERE "tagId" = ?`, [
+      canonicalId,
+      duplicate.id,
+    ]);
+    await tx.run('DELETE FROM "Tag" WHERE "id" = ?', [duplicate.id]);
+  }
+}
+
+/**
+ * `MealPlan(planDate,mealType) WHERE deletedAt IS NULL` 部分唯一索引：云端权威行
+ * 要占用同一槽位时，本地不同 ID 的排餐必须先让位。
+ *
+ * - 本地占位行没有待推操作：服务端已判定槽位归属，直接物理删除本地占位行；
+ * - 本地占位行仍是未上云的新建（`baseVersion` 全为 null）：同样让位并丢弃其操作链；
+ * - 本地占位行是既有排餐的改期（`baseVersion` 非 null）：不能在这里猜原槽位，
+ *   跳过权威行，留给该计划自身的冲突收敛与权威恢复。
+ */
+async function clearPlanSlot(
+  tx: WriteTransaction,
+  row: Record<string, unknown>,
+  canonicalId: SqlValue,
+): Promise<boolean> {
+  if (row.deletedAt !== null && row.deletedAt !== undefined) return true;
+  if (typeof row.planDate !== 'string' || typeof row.mealType !== 'string') return true;
+  const holders = await tx.query<{ id: string }>(
+    `SELECT "id" FROM "MealPlan"
+      WHERE "planDate" = ? AND "mealType" = ? AND "deletedAt" IS NULL AND "id" <> ?`,
+    [row.planDate, row.mealType, canonicalId],
+  );
+  for (const holder of holders) {
+    const pending = await tx.query<{ baseVersion: number | null; opId: string }>(
+      `SELECT "baseVersion","opId" FROM "${SYNC_OUTBOX_TABLE}"
+        WHERE "entity" = 'MealPlan' AND "entityId" = ?`,
+      [holder.id],
+    );
+    if (pending.some((operation) => operation.baseVersion !== null)) return false;
+    for (const operation of pending) {
+      await tx.run(`DELETE FROM "${SYNC_OUTBOX_TABLE}" WHERE "opId" = ?`, [operation.opId]);
+    }
+    await tx.run('DELETE FROM "MealPlanItem" WHERE "mealPlanId" = ?', [holder.id]);
+    await tx.run('DELETE FROM "MealPlanDiner" WHERE "mealPlanId" = ?', [holder.id]);
+    await tx.run('DELETE FROM "MealPlan" WHERE "id" = ?', [holder.id]);
+  }
+  return true;
+}
+
+/**
  * 在已打开的事务内按行应用云端数据。
  *
  * - `row === null`：物理删除；软删由服务端下发完整行表达，绝不在此推断。
- * - 其余：按主键原地更新，保留外键引用。
+ * - 其余：先对齐本地同自然键旧行（主键可能不同），再按主键原地更新，保留外键引用。
  *
  * 注意：事务内的一切查询必须走 `tx`；`DatabaseClient.query` 会排队等待同一把写锁，
  * 在事务回调里调用会自我死锁。
@@ -261,6 +368,10 @@ export async function applyRowChanges(
       await tx.run(`DELETE FROM "${table}" WHERE "id" = ?`, [normalizeValue(change.id)]);
       continue;
     }
+    const id = normalizeValue(change.id);
+    if (table === 'Tag') await alignTagNaturalKey(tx, change.row, id);
+    else await clearNaturalKeyConflicts(tx, table, change.row, id);
+    if (table === 'MealPlan' && !(await clearPlanSlot(tx, change.row, id))) continue;
     const entries = Object.entries(change.row).filter(
       ([column]) => columns.has(column) && column !== undefined,
     );
@@ -432,25 +543,48 @@ export async function pendingEntityKeys(
   return new Set(rows.map((row) => `${row.entity}:${row.entityId}`));
 }
 
-/** 删除指定操作，以及同一实体的全部后继操作（版本链已断，后继必失败）。 */
+export interface OutboxChainRow {
+  readonly opId: string;
+  readonly entity: string;
+  readonly entityId: string;
+  readonly kind: 'upsert' | 'delete' | 'command';
+  readonly commandType: string | null;
+  readonly baseVersion: number | null;
+  readonly payloadJson: string | null;
+}
+
+/**
+ * 删除指定操作，以及同一实体的全部后继操作（版本链已断，后继必失败）。
+ *
+ * 返回整条被丢弃操作链的明细：调用方据此把链上每个操作产生的本地副作用
+ * （新建批次/日志、草稿记录、入库食材等）在同一个事务内一并回滚。
+ */
 export async function dropOperationChain(
   tx: WriteTransaction,
   target: { opId: string; entity: string; entityId: string },
-): Promise<string[]> {
+): Promise<OutboxChainRow[]> {
   const [targetRow] = await tx.query<{ rowid: number }>(
     `SELECT rowid FROM "${SYNC_OUTBOX_TABLE}" WHERE "opId" = ?`,
     [target.opId],
   );
-  const rows = await tx.query<{ opId: string; rowid: number }>(
-    `SELECT "opId", rowid FROM "${SYNC_OUTBOX_TABLE}"
+  const rows = await tx.query<OutboxChainRow & { rowid: number }>(
+    `SELECT "opId","entity","entityId","kind","commandType","baseVersion","payloadJson", rowid
+       FROM "${SYNC_OUTBOX_TABLE}"
       WHERE "entity" = ? AND "entityId" = ? AND rowid >= ? ORDER BY rowid`,
     [target.entity, target.entityId, targetRow?.rowid ?? 0],
   );
-  const opIds = rows.map((row) => row.opId);
-  for (const opId of opIds) {
-    await tx.run(`DELETE FROM "${SYNC_OUTBOX_TABLE}" WHERE "opId" = ?`, [opId]);
+  for (const row of rows) {
+    await tx.run(`DELETE FROM "${SYNC_OUTBOX_TABLE}" WHERE "opId" = ?`, [row.opId]);
   }
-  return opIds;
+  return rows.map(({ opId, entity, entityId, kind, commandType, baseVersion, payloadJson }) => ({
+    opId,
+    entity,
+    entityId,
+    kind,
+    commandType,
+    baseVersion,
+    payloadJson,
+  }));
 }
 
 /** 删除单条操作（不连带后继）。 */

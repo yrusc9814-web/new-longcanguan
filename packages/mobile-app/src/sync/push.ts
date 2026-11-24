@@ -9,12 +9,34 @@
  * 服务端对同一 `(clientId, opId)` 幂等，因此本地在收到 ack 前始终保持 `pending`，
  * 崩溃或超时后原样重推不会重复扣库存。
  */
-import type { SyncOperation, SyncPushResult } from '@dafan/shared/sync';
+import type {
+  SyncEntityName,
+  SyncOperation,
+  SyncPushResult,
+  SyncRowChange,
+} from '@dafan/shared/sync';
 
 import type { DatabaseClient } from '../db/database.js';
 import { SyncHttpError } from './http.js';
 import type { SyncHttpClient } from './http.js';
-import { dropOperation, dropOperationChain, pendingOutbox, type OutboxRow } from './ledger.js';
+import {
+  dropOperation,
+  dropOperationChain,
+  pendingOutbox,
+  type OutboxChainRow,
+  type OutboxRow,
+} from './ledger.js';
+
+/**
+ * 云端在拒绝某个聚合根时附带该聚合的完整权威行集合（父行 + 全部相关子行）。
+ * 端侧据此在同一个本地事务内回滚被丢操作链副作用并完整重对齐，
+ * 不再依赖「拉取游标之后」的增量日志，避免跳过过的 sync_log 造成恢复缺口。
+ */
+export interface AuthoritativeEntityRows {
+  readonly entity: SyncEntityName;
+  readonly entityId: string;
+  readonly rows: readonly SyncRowChange[];
+}
 
 export interface PushConflict {
   readonly opId: string;
@@ -25,6 +47,27 @@ export interface PushConflict {
   readonly ingredientId: string | null;
   readonly winner: Record<string, unknown> | null;
   readonly payload: Record<string, unknown> | null;
+  /** 被本次拒绝连带丢弃的整条操作链（含被拒操作本身）。 */
+  readonly chain: readonly OutboxChainRow[];
+  /** 云端权威聚合行；旧版服务端可能为空。 */
+  readonly authoritative: readonly AuthoritativeEntityRows[];
+}
+
+function readAuthoritative(raw: unknown): AuthoritativeEntityRows[] {
+  if (!Array.isArray(raw)) return [];
+  const result: AuthoritativeEntityRows[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const value = entry as { entity?: unknown; entityId?: unknown; rows?: unknown };
+    if (typeof value.entity !== 'string' || typeof value.entityId !== 'string') continue;
+    if (!Array.isArray(value.rows)) continue;
+    result.push({
+      entity: value.entity as SyncEntityName,
+      entityId: value.entityId,
+      rows: value.rows as SyncRowChange[],
+    });
+  }
+  return result;
 }
 
 export interface PushResult {
@@ -146,6 +189,11 @@ export async function pushOutbox(options: PushOptions): Promise<PushResult> {
         const row = byId.get(rejection.operationId);
         if (!row) continue;
         const payload = row.payloadJson === null ? null : JSON.parse(row.payloadJson);
+        const chain = await dropOperationChain(tx, {
+          opId: row.opId,
+          entity: row.entity,
+          entityId: row.entityId,
+        });
         conflicts.push({
           opId: row.opId,
           entity: row.entity,
@@ -155,11 +203,10 @@ export async function pushOutbox(options: PushOptions): Promise<PushResult> {
           ingredientId: rejection.ingredientId ?? null,
           winner: (rejection.winner as Record<string, unknown> | undefined) ?? null,
           payload: payload as Record<string, unknown> | null,
-        });
-        await dropOperationChain(tx, {
-          opId: row.opId,
-          entity: row.entity,
-          entityId: row.entityId,
+          chain,
+          authoritative: readAuthoritative(
+            (rejection as { authoritative?: unknown }).authoritative,
+          ),
         });
       }
     });

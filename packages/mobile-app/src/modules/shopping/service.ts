@@ -156,7 +156,8 @@ function toItemFact(row: ShoppingListItemRow): ShoppingListItemFactPayload {
 async function listUpsertPayload(
   tx: WriteTransaction,
   list: ShoppingListRow,
-): Promise<ShoppingListUpsertPayload> {
+  baseItems?: readonly ShoppingListItemFactPayload[],
+): Promise<ShoppingListUpsertPayload & { baseItems?: readonly ShoppingListItemFactPayload[] }> {
   const items = await readItems(tx, list.id);
   return {
     id: list.id,
@@ -168,7 +169,17 @@ async function listUpsertPayload(
     createdAt: list.createdAt,
     updatedAt: list.updatedAt,
     items: items.map(toItemFact),
+    // 本次操作实际基于的本地条目快照（形态同 items），云端据此做真实三方合并。
+    ...(baseItems ? { baseItems: baseItems.map(toItemFact) } : {}),
   };
+}
+
+/** 本次写入前的条目快照：必须在写业务表之前读取。 */
+async function itemBaseSnapshot(
+  tx: WriteTransaction,
+  listId: string,
+): Promise<ShoppingListItemFactPayload[]> {
+  return (await readItems(tx, listId)).map(toItemFact);
 }
 
 /**
@@ -176,13 +187,16 @@ async function listUpsertPayload(
  *
  * `baseVersion` 由调用方给出真实期望版本，不再读取发件箱瞬态状态推断：
  * 新建副单为 `null`（载荷 version 1），其余实际写入一律等于本次 `expectedVersion`。
+ * `baseItems` 是本次操作前的本地条目快照，连续多次离线修改时云端靠它区分
+ * 「客户端没看到」与「客户端真的删了」。
  */
 async function enqueueListUpsert(
   tx: WriteTransaction,
   list: ShoppingListRow,
   baseVersion: number | null,
+  baseItems?: readonly ShoppingListItemFactPayload[],
 ): Promise<void> {
-  const payload = await listUpsertPayload(tx, list);
+  const payload = await listUpsertPayload(tx, list, baseItems);
   await tx.enqueue({
     opId: newLocalId(),
     entity: 'ShoppingList',
@@ -388,6 +402,7 @@ export async function addShoppingItem(
     if (list.version !== input.version) {
       throw new VersionConflictError('ShoppingList', listId, input.version, list.version);
     }
+    const baseItems = await itemBaseSnapshot(tx, listId);
     const id = nextId();
     const sortOrder = input.sortOrder ?? (await nextSortOrder(tx, listId));
     await tx.run(
@@ -414,7 +429,7 @@ export async function addShoppingItem(
       ],
     );
     const next = await bumpListVersion(tx, listId, input.version, timestamp);
-    await enqueueListUpsert(tx, next, input.version);
+    await enqueueListUpsert(tx, next, input.version, baseItems);
     return readListDto(tx, next);
   });
 }
@@ -444,6 +459,7 @@ export async function updateShoppingItem(
     if (list.version !== input.version) {
       throw new VersionConflictError('ShoppingList', list.id, input.version, list.version);
     }
+    const baseItems = await itemBaseSnapshot(tx, list.id);
 
     const assignments: string[] = [];
     const values: SqlValue[] = [];
@@ -493,7 +509,7 @@ export async function updateShoppingItem(
       itemId,
     ]);
     const next = await bumpListVersion(tx, list.id, input.version, timestamp);
-    await enqueueListUpsert(tx, next, input.version);
+    await enqueueListUpsert(tx, next, input.version, baseItems);
     return readListDto(tx, next);
   });
 }
@@ -516,9 +532,10 @@ export async function deleteShoppingItem(
     if (list.version !== version) {
       throw new VersionConflictError('ShoppingList', list.id, version, list.version);
     }
+    const baseItems = await itemBaseSnapshot(tx, list.id);
     await tx.run('DELETE FROM "ShoppingListItem" WHERE "id" = ?', [itemId]);
     const next = await bumpListVersion(tx, list.id, version, timestamp);
-    await enqueueListUpsert(tx, next, version);
+    await enqueueListUpsert(tx, next, version, baseItems);
     return { id: itemId, deleted: true as const };
   });
 }
@@ -536,6 +553,7 @@ export async function clearCompletedItems(
     if (list.version !== version) {
       throw new VersionConflictError('ShoppingList', listId, version, list.version);
     }
+    const baseItems = await itemBaseSnapshot(tx, listId);
     const removed = await tx.run(
       'DELETE FROM "ShoppingListItem" WHERE "shoppingListId" = ? AND "completed" = 1',
       [listId],
@@ -543,7 +561,7 @@ export async function clearCompletedItems(
     const cleared = removed.changes;
     if (cleared === 0) return { list: await readListDto(tx, list), cleared };
     const next = await bumpListVersion(tx, listId, version, timestamp);
-    await enqueueListUpsert(tx, next, version);
+    await enqueueListUpsert(tx, next, version, baseItems);
     return { list: await readListDto(tx, next), cleared };
   });
 }
@@ -605,6 +623,7 @@ export async function replenishRecipe(
     }
     if (list.status !== 'ACTIVE')
       throw new LocalApiError(409, 'CONFLICT', '仅进行中的购物清单支持补齐缺料');
+    const baseItems = await itemBaseSnapshot(tx, listId);
     let sortOrder = await nextSortOrder(tx, listId);
     const keyFor = (ingredientId: string | null, name: string) =>
       ingredientId ? `id:${ingredientId}` : `name:${normalizeName(name)}`;
@@ -673,7 +692,7 @@ export async function replenishRecipe(
       sortOrder += 1;
     }
     const next = await bumpListVersion(tx, listId, input.version, timestamp);
-    await enqueueListUpsert(tx, next, input.version);
+    await enqueueListUpsert(tx, next, input.version, baseItems);
     return readListDto(tx, next);
   });
 }

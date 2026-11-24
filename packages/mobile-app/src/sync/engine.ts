@@ -49,12 +49,7 @@ import {
   type SyncHttpContext,
 } from './http.js';
 import { createImageSyncQueue, type ImageAssetRef, type ImageSyncQueue } from './images.js';
-import {
-  alignConflictedEntities,
-  pullUntilIdle,
-  rollbackLocalIngredient,
-  rollbackLocalPlan,
-} from './pull.js';
+import { alignConflictedEntities, convergePushConflicts, pullUntilIdle } from './pull.js';
 import { pushOutbox, type PushConflict } from './push.js';
 import { restoreOwnerCloudBackup } from './restore.js';
 import type { BackupConsumers } from '../modules/backup/service.js';
@@ -472,11 +467,35 @@ export class SyncEngine {
     }
 
     if (!this.stopped) await this.ensureSocket();
-    const pushed = await pushOutbox({
+    for (;;) {
+      const pushed = await this.pushBatch(database, context.epoch);
+      if (!pushed.conflicts.length) {
+        if (pushed.unresolved) throw new SyncNetworkError('云端尚未确认部分操作');
+        break;
+      }
+      await this.convergeConflicts(database, context.epoch, pushed.conflicts);
+    }
+    await pullUntilIdle(
+      {
+        database,
+        http: this.http,
+        epoch: context.epoch,
+        onApplied: (changes) => this.queueImageDownloads(changes),
+      },
+      50,
+    );
+    await this.drainImageDownloads();
+    this.lastError = null;
+    this.lastSyncedAt = (this.options.now?.() ?? new Date()).toISOString();
+    await this.emitState('ok');
+  }
+
+  private async pushBatch(database: DatabaseClient, epoch: number) {
+    return pushOutbox({
       database,
       http: this.http,
       clientId: await this.deviceId(),
-      epoch: context.epoch,
+      epoch,
       connectionId: this.connectionId,
       batchSize: this.options.pushBatchSize,
       beforePush: async (operations) => {
@@ -492,27 +511,9 @@ export class SyncEngine {
             },
           ];
         });
-        await this.uploadImages(assets, context.epoch);
+        await this.uploadImages(assets, epoch);
       },
     });
-    await this.convergeConflicts(database, context.epoch, pushed.conflicts);
-    if (pushed.conflicts.length === 0) {
-      await pullUntilIdle(
-        {
-          database,
-          http: this.http,
-          epoch: context.epoch,
-          onApplied: (changes) => this.queueImageDownloads(changes),
-        },
-        50,
-      );
-    }
-    await this.drainImageDownloads();
-
-    this.phase = 'ok';
-    this.lastError = null;
-    this.lastSyncedAt = (this.options.now?.() ?? new Date()).toISOString();
-    await this.emitState('ok');
   }
 
   private async ensureSocket(): Promise<void> {
@@ -545,24 +546,25 @@ export class SyncEngine {
     await this.socket.connect();
   }
 
-  /** 冲突收敛：回滚本地未确认写入 → 强制拉权威行 → 发结构化事件。 */
+  /** 冲突收敛：整链回滚本地副作用 → 应用云端权威聚合 → 强制拉权威行 → 发结构化事件。 */
   private async convergeConflicts(
     database: DatabaseClient,
     epoch: number,
     conflicts: readonly PushConflict[],
   ): Promise<void> {
     if (conflicts.length === 0) return;
+    const outcomes = await convergePushConflicts(database, conflicts);
     for (const conflict of conflicts) {
+      const outcome = outcomes.get(conflict.opId);
       if (conflict.code === 'PLAN_SLOT_CONFLICT') {
-        await rollbackLocalPlan(database, conflict.entityId);
         this.events(PLAN_SLOT_CONFLICT_EVENT, {
           planId: conflict.entityId,
           winner: conflict.winner,
           claimedPlan: conflict.payload,
+          removed: outcome?.planRemoved ?? false,
         });
       } else if (conflict.code === 'INSUFFICIENT_STOCK' || conflict.code === 'VERSION_CONFLICT') {
         if (conflict.entity === 'Ingredient') {
-          await rollbackLocalIngredient(database, conflict);
           this.events(INGREDIENT_CONFLICT_EVENT, {
             ingredientId: conflict.ingredientId ?? conflict.entityId,
             code: conflict.code,
@@ -577,9 +579,14 @@ export class SyncEngine {
         code: conflict.code,
         serverVersion: conflict.serverVersion,
         ingredientId: conflict.ingredientId,
+        authoritative: outcome?.authoritative ?? false,
       });
     }
-    await alignConflictedEntities({ database, http: this.http, epoch }, conflicts);
+    // 权威集合已随回滚事务写入；旧版服务端没有权威集合时退回增量强制对齐。
+    const unresolved = conflicts.filter((conflict) => !outcomes.get(conflict.opId)?.authoritative);
+    if (unresolved.length > 0) {
+      await alignConflictedEntities({ database, http: this.http, epoch }, unresolved);
+    }
   }
 
   // ---------------------------------------------------------------- 代际切换
