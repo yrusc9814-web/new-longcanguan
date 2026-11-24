@@ -70,6 +70,14 @@ export interface SyncRejection {
   readonly serverVersion: number | null;
   readonly ingredientId?: string;
   readonly winner?: SyncPayload;
+  readonly authoritative?: readonly SyncAuthoritativeAggregate[];
+}
+
+export interface SyncAuthoritativeAggregate {
+  readonly entity: SyncEntityName;
+  readonly entityId: string;
+  /** Full parent and child rows. Empty if the server has no matching aggregate. */
+  readonly rows: readonly SyncRowChange[];
 }
 
 export interface SyncAcknowledgement {

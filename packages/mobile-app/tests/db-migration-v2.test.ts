@@ -30,7 +30,11 @@ it('v1 库迁移失败可重试，迁移后重开保留业务数据、PIN 配置
     for (const statement of [
       ...BUSINESS_TABLE_DDL,
       ...BUSINESS_INDEX_DDL,
-      ...LOCAL_TABLE_DDL.filter((ddl) => !ddl.startsWith('CREATE TABLE "sync_outbox"')),
+      ...LOCAL_TABLE_DDL.filter(
+        (ddl) =>
+          !ddl.startsWith('CREATE TABLE "sync_outbox"') &&
+          !ddl.startsWith('CREATE TABLE "sync_init_pages"'),
+      ).map((ddl) => ddl.replace('    "latestSafetyBackup" TEXT,\n', '')),
     ]) {
       await driver.exec(statement);
     }
@@ -79,7 +83,7 @@ it('v1 库迁移失败可重试，迁移后重开保留业务数据、PIN 配置
       });
       try {
         await migrate(migrated);
-        await expect(migrated.query('PRAGMA user_version')).resolves.toEqual([{ user_version: 2 }]);
+        await expect(migrated.query('PRAGMA user_version')).resolves.toEqual([{ user_version: 3 }]);
         await expect(migrated.query('SELECT * FROM "sync_outbox"')).resolves.toEqual(
           original.map((row) => ({ ...row, commandType: null, payloadHash: null })),
         );

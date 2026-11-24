@@ -25,6 +25,7 @@ export interface SyncStatusSnapshot {
   readonly pendingOperations: number;
   readonly lastError: string | null;
   readonly lastSyncedAt: string | null;
+  readonly latestSafetyBackup: string | null;
 }
 
 export type SyncEventName =

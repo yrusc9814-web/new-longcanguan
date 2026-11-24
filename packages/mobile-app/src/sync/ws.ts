@@ -22,6 +22,7 @@ export interface SocketLike {
 
 export type SocketFactory = (url: string) => SocketLike;
 
+const CONNECTING = 0;
 const OPEN = 1;
 
 export interface SyncSocketOptions {
@@ -60,7 +61,7 @@ export class SyncSocket {
   private stopped = false;
   private timer: unknown = null;
   private attempt = 0;
-  private failure = 0;
+  private requestingTicket = false;
   connectionId: string | null = null;
 
   constructor(private readonly options: SyncSocketOptions) {}
@@ -70,9 +71,25 @@ export class SyncSocket {
   }
 
   async connect(): Promise<void> {
-    if (this.stopped) return;
+    if (
+      this.stopped ||
+      this.requestingTicket ||
+      this.timer !== null ||
+      this.socket?.readyState === CONNECTING ||
+      this.connected
+    )
+      return;
+    this.requestingTicket = true;
+    try {
+      await this.open();
+    } finally {
+      this.requestingTicket = false;
+    }
+  }
+
+  private async open(): Promise<void> {
     const context = await this.options.http.context();
-    if (!context) return;
+    if (!context || this.stopped) return;
     // 捕获代际：帧到达时用它判定是否仍属同一绑定。
     const captured: SyncHttpContext = context;
 
@@ -89,6 +106,7 @@ export class SyncSocket {
       return;
     }
 
+    if (this.stopped) return;
     let socket: SocketLike;
     try {
       socket = (this.options.socketFactory ?? defaultSocketFactory)(
@@ -100,9 +118,13 @@ export class SyncSocket {
       return;
     }
     this.socket = socket;
-    socket.onmessage = (event) => void this.onFrame(captured, event.data);
+    socket.onmessage = (event) => {
+      if (this.socket === socket) void this.onFrame(captured, event.data);
+    };
     socket.onerror = (error) => this.options.onError?.(error);
-    socket.onclose = (event) => this.onClose(event);
+    socket.onclose = (event) => {
+      if (this.socket === socket) this.onClose(event);
+    };
   }
 
   private async onFrame(captured: SyncHttpContext, data: unknown): Promise<void> {
@@ -117,7 +139,6 @@ export class SyncSocket {
     switch (frame.type) {
       case 'SYNC_CONNECTED':
         this.attempt = 0;
-        this.failure = 0;
         this.connectionId = frame.connectionId;
         this.options.onConnected?.(frame.connectionId);
         return;
@@ -163,14 +184,19 @@ export class SyncSocket {
 
   /** 立即重连（前台恢复/网络恢复）。 */
   retryNow(): void {
-    if (this.stopped) return;
+    if (
+      this.stopped ||
+      this.requestingTicket ||
+      this.socket?.readyState === CONNECTING ||
+      this.connected
+    )
+      return;
     const timers = this.options.timers ?? defaultTimers;
     if (this.timer !== null) {
       timers.clearTimeout(this.timer);
       this.timer = null;
     }
     this.attempt = 0;
-    this.socket?.close(1000, 'RETRY');
     void this.connect();
   }
 

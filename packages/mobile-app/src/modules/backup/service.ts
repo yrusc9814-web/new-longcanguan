@@ -2,7 +2,7 @@
 import { unzipSync, zipSync, type Zippable } from 'fflate';
 
 import type { DatabaseClient, WriteTransaction } from '../../db/database.js';
-import { BUSINESS_TABLES } from '../../db/schema.js';
+import { BUSINESS_TABLES, LOCAL_TABLES } from '../../db/schema.js';
 import type { SqlValue } from '../../db/types.js';
 import { AsyncMutex } from '../../db/mutex.js';
 import { LocalApiError, readFormDataBody } from '../../local-api/protocol.js';
@@ -43,7 +43,7 @@ export interface BackupManifest {
   readonly files: Record<string, ManifestEntry>;
 }
 
-const FORBIDDEN_TABLES = ['device_local_config', 'sync_outbox', 'sync_state'] as const;
+const FORBIDDEN_TABLES = LOCAL_TABLES;
 const FORBIDDEN_MANIFEST_FIELDS = [
   'pinHash',
   'memberToken',
@@ -90,7 +90,9 @@ interface UploadReferenceRow {
   readonly thumbnailPath: string | null;
 }
 
-function uploadReferences(snapshot: Record<string, readonly Record<string, unknown>[]>): string[] {
+export function uploadReferences(
+  snapshot: Record<string, readonly Record<string, unknown>[]>,
+): string[] {
   const filenames = new Set<string>();
   const add = (path: unknown, relative = false) => {
     if (typeof path !== 'string' || !path) return;

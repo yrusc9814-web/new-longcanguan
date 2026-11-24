@@ -11,6 +11,7 @@ import { zipSync, type Zippable } from 'fflate';
 
 import { BUSINESS_TABLES, SYNC_OUTBOX_TABLE } from '../db/schema.js';
 import type { DatabaseClient } from '../db/database.js';
+import { uploadReferences } from '../modules/backup/service.js';
 import { sha256Hex } from '../modules/uploads/codec.js';
 
 export const SAFETY_BACKUP_VERSION = 1;
@@ -41,6 +42,7 @@ export interface SafetyBackupOptions {
   readonly database: DatabaseClient;
   readonly fromEpoch: number;
   readonly toEpoch: number;
+  readonly uploads?: { readFile(options: { path: string }): Promise<{ data: Uint8Array | null }> };
   readonly now?: () => Date;
 }
 
@@ -49,23 +51,37 @@ function entryName(table: string): string {
 }
 
 export async function createSafetyBackup(options: SafetyBackupOptions): Promise<SafetyBackup> {
-  const { database } = options;
+  const { snapshot, pending } = await options.database.withWriteTransaction(async (tx) => {
+    const snapshot: Record<string, Record<string, unknown>[]> = {};
+    for (const table of BUSINESS_TABLES) {
+      snapshot[table] = await tx.query<Record<string, unknown>>(
+        `SELECT * FROM "${table}" ORDER BY rowid`,
+      );
+    }
+    const pending = await tx.query<Record<string, unknown>>(
+      `SELECT "opId","entity","entityId","kind","commandType","baseVersion","payloadJson","epoch","createdAt"
+         FROM "${SYNC_OUTBOX_TABLE}" ORDER BY rowid`,
+    );
+    return { snapshot, pending };
+  });
   const files: Record<string, ManifestEntry> = {};
   const zipEntries: Zippable = {};
-
-  for (const table of BUSINESS_TABLES) {
-    const rows = await database.query<Record<string, unknown>>(
-      `SELECT * FROM "${table}" ORDER BY rowid`,
-    );
+  for (const [table, rows] of Object.entries(snapshot)) {
     const bytes = new TextEncoder().encode(JSON.stringify(rows));
     zipEntries[entryName(table)] = bytes;
     files[entryName(table)] = { size: bytes.byteLength, sha256: await sha256Hex(bytes) };
   }
 
-  const pending = await database.query<Record<string, unknown>>(
-    `SELECT "opId","entity","entityId","kind","commandType","baseVersion","payloadJson","epoch","createdAt"
-       FROM "${SYNC_OUTBOX_TABLE}" ORDER BY rowid`,
-  );
+  if (options.uploads) {
+    for (const path of uploadReferences(snapshot)) {
+      const { data } = await options.uploads.readFile({ path });
+      if (!data) continue; // 云端图片可能尚未缓存，备份只记录本机确实存在的字节。
+      const name = `uploads/${path}`;
+      zipEntries[name] = data;
+      files[name] = { size: data.byteLength, sha256: await sha256Hex(data) };
+    }
+  }
+
   const pendingBytes = new TextEncoder().encode(JSON.stringify(pending));
   zipEntries['sync/pending.json'] = pendingBytes;
   files['sync/pending.json'] = {
@@ -100,17 +116,19 @@ export interface SafetyBackupStore {
   write(backup: SafetyBackup): Promise<string>;
 }
 
-export interface SafetyBackupFiles {
-  writeFile(options: { path: string; data: Uint8Array }): Promise<void>;
-}
+import type { UploadsFilesBridge } from '../native/upload-files.js';
 
-/** 默认写到 uploads 同源的 `safety-backups/` 子目录，受原生路径策略保护。 */
+export type SafetyBackupFiles = Pick<UploadsFilesBridge, 'writeFile'> & {
+  writeSafetyBackup?(options: { name: string; data: Uint8Array }): Promise<void>;
+};
+
+/** 备份位于原生私有目录，和上传目录的替换互相独立。 */
 export function createSafetyBackupStore(files: SafetyBackupFiles): SafetyBackupStore {
   return {
     async write(backup) {
-      const path = `safety-backups/${backup.name.replace(/[^A-Za-z0-9._-]/g, '_')}`;
-      await files.writeFile({ path, data: backup.bytes });
-      return path;
+      if (!files.writeSafetyBackup) throw new Error('安全备份存储不可用');
+      await files.writeSafetyBackup({ name: backup.name, data: backup.bytes });
+      return backup.name;
     },
   };
 }

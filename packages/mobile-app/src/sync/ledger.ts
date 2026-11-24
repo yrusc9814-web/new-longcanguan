@@ -64,8 +64,10 @@ export async function writeBinding(
   database: DatabaseClient,
   input: BindingInput,
   now: () => Date,
+  prepare?: (tx: WriteTransaction) => Promise<void>,
 ): Promise<number> {
   return database.withWriteTransaction(async (tx) => {
+    await prepare?.(tx);
     const [row] = await tx.query<{ generation: number }>(
       `SELECT "bindingGeneration" AS generation FROM "${CONFIG_TABLE}" WHERE "id" = 1`,
     );

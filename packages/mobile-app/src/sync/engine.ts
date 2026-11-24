@@ -12,7 +12,8 @@ import type {
   SyncRowChange,
 } from '@dafan/shared/sync';
 
-import type { DatabaseClient } from '../db/database.js';
+import type { DatabaseClient, WriteTransaction } from '../db/database.js';
+import { SYNC_INIT_TABLE } from '../db/schema.js';
 import type { AppSecurityBridge } from '../native/app-security.js';
 import { uploadFiles, type UploadsFilesBridge } from '../native/upload-files.js';
 import {
@@ -47,7 +48,7 @@ import {
   type SyncFetch,
   type SyncHttpContext,
 } from './http.js';
-import { createImageSyncQueue, ImageSyncQueue } from './images.js';
+import { createImageSyncQueue, type ImageAssetRef, type ImageSyncQueue } from './images.js';
 import {
   alignConflictedEntities,
   pullUntilIdle,
@@ -62,7 +63,13 @@ import {
   createSafetyBackupStore,
   type SafetyBackupStore,
 } from './safety-backup.js';
-import { downloadSnapshot, uploadInitialSnapshot } from './snapshot.js';
+import {
+  downloadSnapshot,
+  readInitialUpload,
+  stageInitialUpload,
+  uploadInitialSnapshot,
+  type StagedInitialUpload,
+} from './snapshot.js';
 import { createSyncSocket, type SocketFactory, type SyncSocket, type Timers } from './ws.js';
 import type { UploadAssetRow } from '../modules/uploads/service.js';
 
@@ -100,7 +107,7 @@ export interface CreateSyncEngineOptions {
   readonly pushBatchSize?: number;
   /** 可信撤权时由外层（安全清退代理）执行；引擎自身只负责停同步、发事件。 */
   readonly onRevoked?: (evidence: RevocationEvidence) => void | Promise<void>;
-  /** 本地安全备份落盘；缺省写 uploads 同源的 safety-backups/。 */
+  /** 本地安全备份持久化，默认用原生独立目录。 */
   readonly safetyBackupStore?: SafetyBackupStore;
   readonly imageQueue?: ImageSyncQueue;
   /** 测试/原生壳注入自定义 WebSocket 实现。 */
@@ -209,7 +216,11 @@ export class SyncEngine {
   }
 
   /** 绑定/加入/恢复成功后统一落库：写绑定、存 token、切代际。 */
-  private async persistBinding(origin: string, binding: HouseholdBinding): Promise<LocalBinding> {
+  private async persistBinding(
+    origin: string,
+    binding: HouseholdBinding,
+    prepare?: (tx: WriteTransaction) => Promise<void>,
+  ): Promise<LocalBinding> {
     const database = await this.options.getDatabase();
     await this.options.security.setMemberToken({ memberToken: binding.token });
     const generation = await writeBinding(
@@ -221,6 +232,7 @@ export class SyncEngine {
         role: binding.role,
       },
       () => this.options.now?.() ?? new Date(),
+      prepare,
     );
     return {
       cloudOrigin: new URL(origin).origin,
@@ -247,27 +259,14 @@ export class SyncEngine {
         body: JSON.stringify(body),
         anonymous: true,
       })) as HouseholdBinding;
-      const local = await this.persistBinding(this.pendingOrigin, binding);
-      await this.enqueueLedgerImages(database, 'upload', binding.epoch);
-      // 馆主带离线数据首绑空云：先上云再切到云端序号。
-      const uploaded = await uploadInitialSnapshot({
-        database,
-        http: this.http,
-        epoch: binding.epoch,
-        headerEpoch: binding.epoch,
-        pageSize: this.options.snapshotPageSize,
+      const local = await this.persistBinding(this.pendingOrigin, binding, async (tx) => {
+        await stageInitialUpload(tx, binding.epoch, this.options.snapshotPageSize);
       });
-      await database.withWriteTransaction(async (tx) => {
-        await tx.run(`UPDATE "sync_state" SET "epoch" = ?, "last_sync_seq" = ? WHERE "id" = 1`, [
-          uploaded.epoch,
-          String(uploaded.seq),
-        ]);
-      });
-      // 首次上云后立刻补拉：上传期间他人写入（理论上无，但保留一致性保证）不漏。
-      await pullUntilIdle({ database, http: this.http, epoch: uploaded.epoch }, 50);
+      await this.syncOnce();
+      const state = await readSyncState(database);
       return {
-        binding: { ...local, epoch: uploaded.epoch },
-        initialized: true,
+        binding: { ...local, epoch: binding.epoch },
+        initialized: state.epoch === binding.epoch && !(await readInitialUpload(database)),
       };
     } finally {
       this.pendingOrigin = null;
@@ -282,6 +281,9 @@ export class SyncEngine {
     const database = await this.options.getDatabase();
     if (await readBinding(database))
       throw new SyncHttpError(409, 'ALREADY_BOUND', '设备已绑定家庭');
+    if (!(await isLedgerEmpty(database)) && options.confirmOverwriteLocal !== true) {
+      throw new RequiresBackupConfirmationError();
+    }
     this.pendingOrigin = new URL(options.origin).origin;
     try {
       const binding = (await this.http.request('/api/household/owner/recover', {
@@ -293,14 +295,18 @@ export class SyncEngine {
       const local = await this.persistBinding(this.pendingOrigin, binding);
       const count = await outboxCount(database);
       if (count > 0) await this.backupBeforeEpochSwitch(0, binding.epoch);
-      await downloadSnapshot({
+      const snapshot = await downloadSnapshot({
         database,
         http: this.http,
         epoch: binding.epoch,
         headerEpoch: binding.epoch,
         pageSize: this.options.snapshotPageSize,
+        onApplied: (changes) => this.queueImageDownloads(changes),
       });
-      return { binding: { ...local, epoch: binding.epoch }, initialized: false };
+      await this.enqueueLedgerImages(database);
+      this.startImageDownloads();
+      await this.emitState('ok');
+      return { binding: { ...local, epoch: snapshot.epoch }, initialized: false };
     } finally {
       this.pendingOrigin = null;
     }
@@ -333,8 +339,10 @@ export class SyncEngine {
         epoch: binding.epoch,
         headerEpoch: binding.epoch,
         pageSize: this.options.snapshotPageSize,
+        onApplied: (changes) => this.queueImageDownloads(changes),
       });
-      await this.enqueueLedgerImages(database, 'download');
+      await this.enqueueLedgerImages(database);
+      this.startImageDownloads();
       await this.emitState('ok');
       return {
         binding: { ...local, epoch: downloaded.epoch },
@@ -349,7 +357,11 @@ export class SyncEngine {
   async leave(): Promise<void> {
     this.stop();
     const database = await this.options.getDatabase();
+    await this.running;
     await clearBinding(database, () => this.options.now?.() ?? new Date());
+    await database.withWriteTransaction(async (tx) => {
+      await tx.run(`DELETE FROM "${SYNC_INIT_TABLE}"`);
+    });
     await this.options.security.clearMemberToken();
     this.lastError = null;
     this.phase = 'idle';
@@ -361,6 +373,9 @@ export class SyncEngine {
     this.stop();
     try {
       await this.running;
+      if (await readInitialUpload(database)) {
+        throw new SyncHttpError(409, 'INITIAL_UPLOAD_PENDING', '请先完成首次账本上传');
+      }
       const result = await restoreOwnerCloudBackup({
         database,
         http: this.http,
@@ -432,25 +447,31 @@ export class SyncEngine {
    * 内部收敛错误（网络/限流/撤权/代际）后正常返回，便于手动"立即同步"与测试。
    */
   async syncOnce(): Promise<void> {
-    try {
-      await this.runOnce();
-    } catch (error) {
-      await this.handleSyncError(error);
+    if (!this.stopped) {
+      await this.wake();
+      return;
     }
+    this.running ??= this.runLoop().finally(() => {
+      this.running = null;
+    });
+    await this.running;
   }
 
   private async runOnce(): Promise<void> {
     const database = await this.options.getDatabase();
-    const context = await this.context();
+    let context = await this.context();
     if (!context) {
-      this.phase = 'idle';
       await this.emitState('idle');
       return;
     }
-    this.phase = 'syncing';
     await this.emitState('syncing');
+    const staged = await readInitialUpload(database);
+    if (staged) {
+      await this.resumeInitialUpload(database, staged);
+      context = { ...context, epoch: staged.epoch };
+    }
 
-    await this.ensureSocket();
+    if (!this.stopped) await this.ensureSocket();
     const pushed = await pushOutbox({
       database,
       http: this.http,
@@ -471,14 +492,7 @@ export class SyncEngine {
             },
           ];
         });
-        for (const asset of assets) this.images.enqueueUpload(asset);
-        if (assets.length) {
-          do {
-            if ((await this.images.drain()).failed) {
-              throw new SyncNetworkError('图片上传尚未完成');
-            }
-          } while (this.images.pending > 0);
-        }
+        await this.uploadImages(assets, context.epoch);
       },
     });
     await this.convergeConflicts(database, context.epoch, pushed.conflicts);
@@ -493,7 +507,7 @@ export class SyncEngine {
         50,
       );
     }
-    await this.images.drain();
+    await this.drainImageDownloads();
 
     this.phase = 'ok';
     this.lastError = null;
@@ -577,19 +591,21 @@ export class SyncEngine {
   async handleEpochReset(serverEpoch: number): Promise<void> {
     const database = await this.options.getDatabase();
     const { epoch } = await readSyncState(database);
-    if (serverEpoch === epoch) return;
+    if (serverEpoch === epoch || (await readInitialUpload(database))) return;
     try {
-      await this.backupBeforeEpochSwitch(epoch, serverEpoch);
+      const latestSafetyBackup = await this.backupBeforeEpochSwitch(epoch, serverEpoch);
       const result = await downloadSnapshot({
         database,
         http: this.http,
         epoch: serverEpoch,
         headerEpoch: serverEpoch,
         pageSize: this.options.snapshotPageSize,
+        onApplied: (changes) => this.queueImageDownloads(changes),
       });
-      await this.enqueueLedgerImages(database, 'download');
+      await this.enqueueLedgerImages(database);
       this.phase = 'epoch-reset';
-      this.events(EPOCH_RESET_EVENT, { epoch: serverEpoch, seq: result.seq });
+      this.events(EPOCH_RESET_EVENT, { epoch: serverEpoch, seq: result.seq, latestSafetyBackup });
+      this.startImageDownloads();
       await this.emitState('epoch-reset');
       this.wake();
     } catch (error) {
@@ -604,19 +620,25 @@ export class SyncEngine {
   private async backupBeforeEpochSwitch(
     fromEpoch: number,
     toEpoch: number,
-  ): Promise<{ path: string } | null> {
+  ): Promise<string | null> {
     const database = await this.options.getDatabase();
     if ((await outboxCount(database)) === 0) return null;
+    const uploads = this.options.files ?? uploadFiles;
     const backup = await createSafetyBackup({
       database,
       fromEpoch,
       toEpoch,
       now: this.options.now,
+      uploads,
     });
-    const store =
-      this.options.safetyBackupStore ?? createSafetyBackupStore(this.options.files ?? uploadFiles);
-    const path = await store.write(backup);
-    return { path };
+    const store = this.options.safetyBackupStore ?? createSafetyBackupStore(uploads);
+    await store.write(backup);
+    await database.withWriteTransaction(async (tx) => {
+      await tx.run('UPDATE "sync_state" SET "latestSafetyBackup" = ? WHERE "id" = 1', [
+        backup.name,
+      ]);
+    });
+    return backup.name;
   }
 
   // ---------------------------------------------------------------- 错误与事件
@@ -684,22 +706,7 @@ export class SyncEngine {
     this.phase = phase;
     let snapshot: SyncStatusSnapshot;
     try {
-      const database = await this.options.getDatabase();
-      const binding = await readBinding(database);
-      const state = await readSyncState(database);
-      const pending = await outboxCount(database, state.epoch);
-      snapshot = {
-        phase,
-        bound: binding != null,
-        householdId: binding?.householdId ?? null,
-        memberId: binding?.memberId ?? null,
-        role: binding?.role ?? null,
-        epoch: state.epoch,
-        lastSeq: state.lastSeq,
-        pendingOperations: pending,
-        lastError: this.lastError,
-        lastSyncedAt: this.lastSyncedAt,
-      };
+      snapshot = await this.status();
     } catch {
       // 数据库不可用（清退中）时仍要发出状态，让 UI 能显示同步已停。
       snapshot = {
@@ -711,6 +718,7 @@ export class SyncEngine {
         epoch: 0,
         lastSeq: 0,
         pendingOperations: 0,
+        latestSafetyBackup: null,
         lastError: this.lastError,
         lastSyncedAt: this.lastSyncedAt,
       };
@@ -723,6 +731,9 @@ export class SyncEngine {
     const binding = await readBinding(database);
     const state = await readSyncState(database);
     const pending = await outboxCount(database, state.epoch);
+    const [backup] = await database.query<{ latestSafetyBackup: string | null }>(
+      'SELECT "latestSafetyBackup" FROM "sync_state" WHERE "id" = 1',
+    );
     return {
       phase: this.phase,
       bound: binding != null,
@@ -732,6 +743,7 @@ export class SyncEngine {
       epoch: state.epoch,
       lastSeq: state.lastSeq,
       pendingOperations: pending,
+      latestSafetyBackup: backup?.latestSafetyBackup ?? null,
       lastError: this.lastError,
       lastSyncedAt: this.lastSyncedAt,
     };
@@ -753,7 +765,7 @@ export class SyncEngine {
       epoch: context.epoch,
       onApplied: (changes) => this.queueImageDownloads(changes),
     });
-    await this.images.drain();
+    await this.drainImageDownloads();
   }
 
   // ---------------------------------------------------------------- 图片
@@ -772,42 +784,56 @@ export class SyncEngine {
     }
   }
 
-  private async enqueueLedgerImages(
+  private async resumeInitialUpload(
     database: DatabaseClient,
-    direction: 'upload' | 'download',
-    epoch?: number,
+    staged: StagedInitialUpload,
   ): Promise<void> {
-    const queue =
-      direction === 'upload'
-        ? createImageSyncQueue({ http: this.http, files: this.options.files ?? uploadFiles, epoch })
-        : this.images;
+    await this.uploadImages(staged.assets, staged.epoch);
+    await uploadInitialSnapshot({ database, http: this.http, epoch: staged.epoch, staged });
+  }
+
+  private async uploadImages(assets: readonly ImageAssetRef[], epoch: number): Promise<void> {
+    const queue = createImageSyncQueue({
+      http: this.http,
+      files: this.options.files ?? uploadFiles,
+      epoch,
+    });
+    for (const asset of assets) queue.enqueueUpload(asset);
+    while (queue.pending > 0) {
+      const result = await queue.drain();
+      if (result.failed)
+        throw result.error ?? new SyncHttpError(502, 'IMAGE_UPLOAD_FAILED', '图片上传失败');
+    }
+  }
+
+  private startImageDownloads(): void {
+    void this.drainImageDownloads().catch((error) => this.handleSyncError(error));
+  }
+
+  private async drainImageDownloads(): Promise<void> {
+    do {
+      const result = await this.images.drain();
+      if (
+        result.error instanceof EpochMismatchError ||
+        result.error instanceof TrustedRevocationError
+      ) {
+        throw result.error;
+      }
+    } while (this.images.pending > 0);
+  }
+
+  private async enqueueLedgerImages(database: DatabaseClient): Promise<void> {
     const rows = await database.query<UploadAssetRow>(
       `SELECT "sha256","storagePath","thumbnailPath" FROM "UploadAsset" WHERE "deletedAt" IS NULL`,
     );
     for (const row of rows) {
       if (typeof row.sha256 !== 'string' || typeof row.storagePath !== 'string') continue;
-      const asset = {
+      this.images.enqueueDownload({
         sha256: row.sha256,
         storagePath: row.storagePath,
         thumbnailPath: typeof row.thumbnailPath === 'string' ? row.thumbnailPath : null,
-      };
-      if (direction === 'upload') queue.enqueueUpload(asset);
-      else queue.enqueueDownload(asset);
+      });
     }
-    if (direction === 'upload') {
-      while (queue.pending > 0) {
-        if ((await queue.drain()).failed) throw new SyncNetworkError('首次同步的图片上传尚未完成');
-      }
-    }
-  }
-
-  /** 上传本地新增图片（由上传业务在事务提交后调用）。 */
-  queueImageUpload(asset: {
-    sha256: string;
-    storagePath: string;
-    thumbnailPath: string | null;
-  }): void {
-    this.images.enqueueUpload(asset);
   }
 
   // ---------------------------------------------------------------- 唤醒源

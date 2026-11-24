@@ -278,6 +278,7 @@ describe('快照：原子替换 + 分页 + 补拉', () => {
       database,
       http: client,
       epoch: 0,
+      headerEpoch: 1,
       pageSize: 2,
       uploadId: 'u1',
     });
@@ -559,6 +560,81 @@ describe('engine：绑定与代际切换', () => {
     ).rejects.toMatchObject({ code: 'REQUIRES_LOCAL_BACKUP_CONFIRMATION' });
     expect(await security.getMemberToken()).toEqual({ memberToken: 'tok' });
     expect(await readBinding(database)).toBeNull();
+  });
+
+  it('馆主换机非空先确认，确认后补齐超过一批的快照和增量图片', async () => {
+    const database = await db();
+    await seedOutboxRow(database, 'local-recipe');
+    const files = createMemoryUploadsFiles();
+    const sample = (index: number) => new Uint8Array([1, 2, index]);
+    const digests = await Promise.all(
+      Array.from({ length: 18 }, (_, index) => sha256Hex(sample(index))),
+    );
+    let cloudCalls = 0;
+    const asset = (index: number) => ({
+      table: 'UploadAsset',
+      id: `asset-${index}`,
+      row: {
+        id: `asset-${index}`,
+        filename: `${index}.webp`,
+        storagePath: `${index}.webp`,
+        thumbnailPath: `${index}-thumb.webp`,
+        sha256: digests[index],
+        mimeType: 'image/webp',
+        sizeBytes: 3,
+        createdAt: NOW.toISOString(),
+        updatedAt: NOW.toISOString(),
+      },
+    });
+    const { engine } = await boundEngine(
+      database,
+      async (url) => {
+        cloudCalls++;
+        const path = new URL(url).pathname;
+        if (path === '/api/household/owner/recover') {
+          return json(200, {
+            householdId: 'hh',
+            memberId: 'owner',
+            role: 'OWNER',
+            epoch: EPOCH,
+            token: 'fixture',
+          });
+        }
+        if (path === '/api/sync/snapshot') {
+          return json(200, {
+            epoch: EPOCH,
+            seq: 1,
+            rows: Array.from({ length: 17 }, (_, i) => asset(i)),
+            nextCursor: null,
+          });
+        }
+        if (path === '/api/sync/pull') {
+          return json(200, {
+            epoch: EPOCH,
+            entries: [{ seq: 2, changes: [asset(17)] }],
+            nextSeq: 2,
+            hasMore: false,
+          });
+        }
+        const index = digests.indexOf(path.split('/').at(-1) ?? '');
+        if (index < 0) throw new Error('unexpected sync request');
+        return new Response(sample(index), { headers: { 'x-content-sha256': digests[index]! } });
+      },
+      { files },
+      { bind: false },
+    );
+    const body = { bootstrapSecret: 'fixture' };
+    const options = { origin: 'https://cloud.example' };
+    await expect(engine.recoverOwner(body, options)).rejects.toMatchObject({
+      code: 'REQUIRES_LOCAL_BACKUP_CONFIRMATION',
+    });
+    expect(cloudCalls).toBe(0);
+    await engine.recoverOwner(body, { ...options, confirmOverwriteLocal: true });
+    await expect
+      .poll(async () => (await files.listFiles({})).paths.length, { timeout: 5000 })
+      .toBe(36);
+    expect(await engine.status()).toMatchObject({ phase: 'ok', epoch: EPOCH, lastSeq: 2 });
+    await database.close();
   });
 
   it('EPOCH_RESET：旧代际有待同步数据时先落安全备份，再切快照并清空发件箱', async () => {

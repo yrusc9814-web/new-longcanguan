@@ -32,17 +32,22 @@ describe('离线库 schema 终态', () => {
     expect([...BUSINESS_TABLES]).toEqual([...RETAINED_MODELS]);
   });
 
-  it('私有端表恰为 3 张：device_local_config / sync_outbox / sync_state', () => {
-    expect(LOCAL_TABLES).toEqual(['device_local_config', 'sync_outbox', 'sync_state']);
-    expect(LOCAL_TABLE_DDL).toHaveLength(3);
+  it('私有端表包含首绑上传暂存表', () => {
+    expect(LOCAL_TABLES).toEqual([
+      'device_local_config',
+      'sync_outbox',
+      'sync_state',
+      'sync_init_pages',
+    ]);
+    expect(LOCAL_TABLE_DDL).toHaveLength(4);
   });
 
-  it('全库 30 张表，且不含三张剔除表', async () => {
+  it('全库 31 张表，且不含三张剔除表', async () => {
     const rows = await handle.query<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     );
     const names = rows.map((r) => r.name);
-    expect(names).toHaveLength(30);
+    expect(names).toHaveLength(31);
     expect(new Set(names)).toEqual(new Set([...RETAINED_MODELS, ...LOCAL_TABLES]));
     for (const retired of RETIRED_TABLE_NAMES) {
       expect(names, retired).not.toContain(retired);
@@ -55,7 +60,7 @@ describe('离线库 schema 终态', () => {
     const indexes = SCHEMA_DDL.filter(
       (s) => s.includes('CREATE INDEX') || s.includes('CREATE UNIQUE INDEX'),
     ).length;
-    expect(tables).toBe(30);
+    expect(tables).toBe(31);
     expect(indexes).toBe(72);
   });
 
@@ -74,7 +79,7 @@ describe('离线库 schema 终态', () => {
 
   it('user_version 等于 SCHEMA_VERSION', async () => {
     const rows = await handle.query<{ user_version: number }>('PRAGMA user_version');
-    expect(rows[0]?.user_version).toBe(2);
+    expect(rows[0]?.user_version).toBe(3);
   });
 
   it('deletedAt 覆盖全部软删实体，MealRecord 额外保留 planUncompleteProof', async () => {
@@ -161,7 +166,9 @@ describe('离线库 schema 终态', () => {
       ]),
     );
     const state = await handle.query<{ name: string }>('PRAGMA table_info("sync_state")');
-    expect(state.map((c) => c.name)).toEqual(['id', 'epoch', 'last_sync_seq', 'updatedAt']);
+    expect(state.map((c) => c.name)).toEqual(
+      expect.arrayContaining(['id', 'epoch', 'last_sync_seq', 'updatedAt', 'latestSafetyBackup']),
+    );
   });
 
   it('单行配置与同步状态在迁移后即存在且各只有一行', async () => {

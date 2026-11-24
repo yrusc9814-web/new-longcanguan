@@ -10,8 +10,8 @@
  */
 import type { SyncRowChange, SyncSnapshotPage, SyncSnapshotUploadResult } from '@dafan/shared/sync';
 
-import type { DatabaseClient } from '../db/database.js';
-import { BUSINESS_TABLES } from '../db/schema.js';
+import type { DatabaseClient, WriteTransaction } from '../db/database.js';
+import { BUSINESS_TABLES, SYNC_INIT_TABLE } from '../db/schema.js';
 import { SyncHttpError } from './http';
 import type { SyncHttpClient } from './http';
 import {
@@ -22,6 +22,7 @@ import {
   tableOrder,
   writeSyncState,
 } from './ledger';
+import type { ImageAssetRef } from './images';
 import { pullUntilIdle } from './pull';
 
 const TABLE_SET = new Set<string>(BUSINESS_TABLES);
@@ -35,6 +36,7 @@ export interface SnapshotOptions {
   readonly maxPages?: number;
   /** 请求头 x-household-epoch 覆盖（切代际后本地 sync_state 尚未更新时使用）。 */
   readonly headerEpoch?: number;
+  readonly onApplied?: (changes: readonly SyncRowChange[]) => void;
 }
 
 function parsePage(raw: unknown): SyncSnapshotPage {
@@ -133,6 +135,7 @@ export async function downloadSnapshot(options: SnapshotOptions): Promise<Snapsh
     http: options.http,
     epoch,
     cache,
+    onApplied: options.onApplied,
   });
 
   return { epoch, seq, rows: all.length, caughtUpRows: caughtUp.applied };
@@ -146,6 +149,7 @@ export interface InitUploadOptions {
   readonly epoch: number;
   readonly uploadId?: string;
   readonly pageSize?: number;
+  readonly staged?: StagedInitialUpload;
   /** x-household-epoch：本机尚未切到新代际时传云端代际（init 后即 binding.epoch）。 */
   readonly headerEpoch?: number;
 }
@@ -156,69 +160,118 @@ export interface InitUploadResult {
   readonly rows: number;
 }
 
-/** 上传前记录发件箱水位：只清掉"已上云"的那部分，上传期间新产生的操作保留。 */
-async function outboxWatermark(database: DatabaseClient): Promise<number> {
-  const [row] = await database.query<{ mark: number | null }>(
+/** 初始上传重试使用完全相同的分页载荷。水位之后的新操作保留待推。 */
+export interface StagedInitialUpload {
+  readonly epoch: number;
+  readonly watermark: number;
+  readonly pages: readonly string[];
+  readonly rows: number;
+  readonly assets: readonly ImageAssetRef[];
+}
+
+export async function stageInitialUpload(
+  tx: WriteTransaction,
+  epoch: number,
+  pageSize = 500,
+  uploadId: string = crypto.randomUUID(),
+): Promise<StagedInitialUpload> {
+  const ordered = await tableOrder(tx);
+  const [watermark] = await tx.query<{ mark: number | null }>(
     `SELECT MAX(rowid) AS mark FROM "sync_outbox"`,
   );
-  return row?.mark ?? 0;
+  const byTable = new Map((await readAllRows(tx)).map(({ table, rows }) => [table, rows]));
+  const rows = ordered.flatMap((table) =>
+    (byTable.get(table) ?? []).map(
+      (row) =>
+        ({
+          table,
+          id: row.id,
+          row,
+        }) as SyncRowChange,
+    ),
+  );
+  const pages = Array.from({ length: Math.max(1, Math.ceil(rows.length / pageSize)) }, (_, page) =>
+    JSON.stringify({
+      uploadId,
+      page,
+      rows: rows.slice(page * pageSize, (page + 1) * pageSize),
+      finalize: (page + 1) * pageSize >= rows.length,
+    }),
+  );
+  const assets = (byTable.get('UploadAsset') ?? []).flatMap(
+    ({ sha256, storagePath, thumbnailPath, deletedAt }) =>
+      !deletedAt && typeof sha256 === 'string' && typeof storagePath === 'string'
+        ? [
+            {
+              sha256,
+              storagePath,
+              thumbnailPath: typeof thumbnailPath === 'string' ? thumbnailPath : null,
+            },
+          ]
+        : [],
+  );
+  const manifest = { epoch, watermark: watermark?.mark ?? 0, rows: rows.length, assets };
+  await tx.run(`DELETE FROM "${SYNC_INIT_TABLE}"`);
+  await tx.run(`INSERT INTO "${SYNC_INIT_TABLE}" VALUES (-1, ?)`, [JSON.stringify(manifest)]);
+  for (const [page, body] of pages.entries()) {
+    await tx.run(`INSERT INTO "${SYNC_INIT_TABLE}" VALUES (?, ?)`, [page, body]);
+  }
+  return { ...manifest, pages };
+}
+
+export async function readInitialUpload(
+  database: DatabaseClient,
+): Promise<StagedInitialUpload | null> {
+  const [manifest, ...pages] = await database.query<{ body: string }>(
+    `SELECT body FROM "${SYNC_INIT_TABLE}" ORDER BY page`,
+  );
+  if (!manifest) return null;
+  return {
+    ...JSON.parse(manifest.body),
+    pages: pages.map(({ body }) => body),
+  } as StagedInitialUpload;
 }
 
 export async function uploadInitialSnapshot(options: InitUploadOptions): Promise<InitUploadResult> {
-  const pageSize = options.pageSize ?? 500;
-  const uploadId = options.uploadId ?? crypto.randomUUID();
-  const ordered = await tableOrder(options.database);
-  const watermark = await outboxWatermark(options.database);
-  const local = new Map(
-    (await readAllRows(options.database)).map((entry) => [entry.table, entry.rows]),
-  );
-
-  const pages: SyncRowChange[][] = [];
-  let current: SyncRowChange[] = [];
-  for (const table of ordered) {
-    for (const row of local.get(table) ?? []) {
-      current.push({ table: table as never, id: row.id as never, row: row as never });
-      if (current.length >= pageSize) {
-        pages.push(current);
-        current = [];
-      }
-    }
-  }
-  pages.push(current); // 允许空页：空库也要发一次 finalize。
-
-  let result: SyncSnapshotUploadResult | null = null;
-  for (let index = 0; index < pages.length; index += 1) {
-    const finalize = index === pages.length - 1;
+  const staged =
+    options.staged ??
+    (await readInitialUpload(options.database)) ??
+    (await options.database.withWriteTransaction((tx) =>
+      stageInitialUpload(
+        tx,
+        options.headerEpoch ?? options.epoch,
+        options.pageSize,
+        options.uploadId,
+      ),
+    ));
+  let result: SyncSnapshotUploadResult | undefined;
+  for (const [index, body] of staged.pages.entries()) {
     const raw = (await options.http.request('/api/sync/init-upload', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      epoch: options.headerEpoch ?? options.epoch,
-      body: JSON.stringify({
-        uploadId,
-        page: index,
-        rows: pages[index],
-        finalize,
-      }),
+      epoch: staged.epoch,
+      body,
     })) as SyncSnapshotUploadResult;
-    const epoch = Number(raw?.epoch);
-    const seq = Number(raw?.seq);
-    if (!Number.isSafeInteger(epoch) || !Number.isSafeInteger(seq)) {
+    const finalize = index === staged.pages.length - 1;
+    if (
+      raw?.epoch !== staged.epoch ||
+      !Number.isSafeInteger(raw.seq) ||
+      raw.seq < 0 ||
+      raw.complete !== finalize
+    ) {
       throw new SyncHttpError(502, 'BAD_RESPONSE', 'init-upload 响应无效');
     }
-    result = { epoch, seq, complete: raw.complete === true };
-    if (finalize && raw.complete !== true) {
-      throw new SyncHttpError(502, 'BAD_RESPONSE', 'init-upload 未确认完成');
-    }
+    result = raw;
   }
-
-  const epoch = result?.epoch ?? options.epoch;
-  const seq = result?.seq ?? 0;
+  if (!result?.complete) throw new SyncHttpError(502, 'BAD_RESPONSE', 'init-upload 未确认完成');
+  const { epoch, seq } = result;
   await options.database.withWriteTransaction(async (tx) => {
-    // 只删到上传开始时的水位；上传期间新产生的本地操作必须保留待推。
-    await tx.run(`DELETE FROM "sync_outbox" WHERE rowid <= ?`, [watermark]);
+    await tx.run(`DELETE FROM "sync_outbox" WHERE rowid <= ?`, [staged.watermark]);
+    await tx.run(`UPDATE "sync_outbox" SET "epoch" = ? WHERE "epoch" <> ?`, [epoch, epoch]);
     await writeSyncState(tx, epoch, seq);
+    await tx.run(`DELETE FROM "${SYNC_INIT_TABLE}"`);
   });
-  return { epoch, seq, rows: pages.reduce((sum, page) => sum + page.length, 0) };
+  return { epoch, seq, rows: staged.rows };
 }
 
 /**

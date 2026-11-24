@@ -19,6 +19,7 @@ import {
   MIGRATE_V1_TO_V2,
   SCHEMA_DDL,
   SCHEMA_VERSION,
+  SYNC_INIT_DDL,
   SYNC_OUTBOX_TABLE,
   SYNC_STATE_TABLE,
 } from './schema';
@@ -419,8 +420,12 @@ export async function migrate(database: DatabaseClient, now = () => new Date()):
       );
     }
     if (current === SCHEMA_VERSION) return;
-    if (current === 1) {
-      for (const statement of MIGRATE_V1_TO_V2) await tx.exec(statement);
+    if (current === 1 || current === 2) {
+      if (current === 1) {
+        for (const statement of MIGRATE_V1_TO_V2) await tx.exec(statement);
+      }
+      await tx.exec(SYNC_INIT_DDL);
+      await tx.exec(`ALTER TABLE "${SYNC_STATE_TABLE}" ADD COLUMN "latestSafetyBackup" TEXT`);
       await tx.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       return;
     }

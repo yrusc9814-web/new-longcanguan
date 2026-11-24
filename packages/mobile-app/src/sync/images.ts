@@ -50,6 +50,7 @@ export interface ImageQueueResult {
   readonly uploaded: number;
   readonly downloaded: number;
   readonly failed: number;
+  readonly error?: unknown;
 }
 
 export class ImageSyncQueue {
@@ -91,8 +92,12 @@ export class ImageSyncQueue {
   }
 
   private async run(): Promise<ImageQueueResult> {
-    const result = { uploaded: 0, downloaded: 0, failed: 0 };
-    const limit = this.options.batchSize ?? 32;
+    const result: { uploaded: number; downloaded: number; failed: number; error?: unknown } = {
+      uploaded: 0,
+      downloaded: 0,
+      failed: 0,
+    };
+    const limit = Math.min(this.tasks.size, this.options.batchSize ?? 32);
     let processed = 0;
     while (this.tasks.size > 0 && processed < limit) {
       const task = this.tasks.values().next().value as QueueTask | undefined;
@@ -106,6 +111,7 @@ export class ImageSyncQueue {
         else result.downloaded += 1;
       } catch (error) {
         result.failed += 1;
+        result.error ??= error;
         task.attempts += 1;
         // 网络/5xx/限流可重试；其余（4xx 业务拒绝）丢弃，避免无限重试放大。
         if (task.attempts < 5 && isRetryable(error) && !this.tasks.has(task.key)) {

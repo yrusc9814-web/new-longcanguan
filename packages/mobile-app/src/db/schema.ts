@@ -24,13 +24,18 @@
 import { BUSINESS_INDEX_DDL, BUSINESS_TABLE_DDL, RETAINED_MODELS } from '@dafan/shared/contracts';
 
 /** schema 版本，写入 PRAGMA user_version。 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** 27 张业务表，与 shared RETAINED_MODELS 一致。 */
 export const BUSINESS_TABLES: readonly string[] = RETAINED_MODELS;
 
 /** 私有端表：只存在于本机，严禁同步。 */
-export const LOCAL_TABLES = ['device_local_config', 'sync_outbox', 'sync_state'] as const;
+export const LOCAL_TABLES = [
+  'device_local_config',
+  'sync_outbox',
+  'sync_state',
+  'sync_init_pages',
+] as const;
 
 export const DEVICE_LOCAL_CONFIG_TABLE = 'device_local_config';
 export const SYNC_OUTBOX_TABLE = 'sync_outbox';
@@ -56,7 +61,13 @@ const OUTBOX_DDL = `CREATE TABLE "sync_outbox" (
     CONSTRAINT "sync_outbox_opId_key" UNIQUE ("opId")
   )`;
 
-/** 私有端表 DDL：本机配置、发件箱、同步状态。 */
+export const SYNC_INIT_TABLE = 'sync_init_pages';
+export const SYNC_INIT_DDL = `CREATE TABLE "${SYNC_INIT_TABLE}" (
+    "page" INTEGER NOT NULL PRIMARY KEY,
+    "body" TEXT NOT NULL
+  )`;
+
+/** 私有端表 DDL：本机配置、发件箱、同步状态和首绑上传暂存。 */
 export const LOCAL_TABLE_DDL: readonly string[] = [
   `CREATE TABLE "device_local_config" (
     "id" INTEGER NOT NULL PRIMARY KEY CHECK ("id" = 1),
@@ -77,8 +88,10 @@ export const LOCAL_TABLE_DDL: readonly string[] = [
     "id" INTEGER NOT NULL PRIMARY KEY CHECK ("id" = 1),
     "epoch" INTEGER NOT NULL DEFAULT 0,
     "last_sync_seq" TEXT,
+    "latestSafetyBackup" TEXT,
     "updatedAt" DATETIME NOT NULL
   )`,
+  SYNC_INIT_DDL,
 ];
 
 /** 私有端表索引。 */

@@ -59,7 +59,7 @@ describe('只读查询入口', () => {
 });
 
 describe('新库初始化', () => {
-  it('空库一次建起 30 张表和 72 个索引，并写入 user_version=2', async () => {
+  it('空库一次建起 31 张表和 72 个索引，并写入 user_version=3', async () => {
     const handle = await freshMemoryDatabase();
     const tables = await handle.query<{ c: number }>(
       "SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
@@ -68,9 +68,9 @@ describe('新库初始化', () => {
       "SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'",
     );
     const version = await handle.query<{ user_version: number }>('PRAGMA user_version');
-    expect(tables[0]?.c).toBe(30);
+    expect(tables[0]?.c).toBe(31);
     expect(indexes[0]?.c).toBe(72);
-    expect(version[0]?.user_version).toBe(2);
+    expect(version[0]?.user_version).toBe(3);
   });
 
   it('重复打开同一文件库不会重复迁移，也不清空已有数据', async () => {
@@ -85,7 +85,7 @@ describe('新库初始化', () => {
       const tables = await second.query<{ c: number }>(
         "SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
       );
-      expect(tables[0]?.c).toBe(30);
+      expect(tables[0]?.c).toBe(31);
       // 单行表仍然只有一行
       expect(
         await count(second, 'SELECT COUNT(*) AS c FROM "device_local_config" WHERE "id" = 1'),
@@ -125,7 +125,7 @@ describe('新库初始化', () => {
             reopened,
             "SELECT COUNT(*) AS c FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
           ),
-        ).toBe(30);
+        ).toBe(31);
         await expect(reopened.query('PRAGMA foreign_key_check')).resolves.toEqual([]);
       } finally {
         await reopened.close();

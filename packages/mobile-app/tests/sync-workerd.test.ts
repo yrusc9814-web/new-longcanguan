@@ -27,6 +27,7 @@ import { createNodeSqliteDriver } from './helpers/node-sqlite-driver';
 
 let runtime: WorkerdHarness;
 const devices: Awaited<ReturnType<typeof makeDevice>>[] = [];
+const pollOptions = { timeout: 10_000 };
 
 async function makeDevice(name: string) {
   const database = await openDatabase({ driver: createNodeSqliteDriver({ path: ':memory:' }) });
@@ -198,7 +199,7 @@ async function makeDevice(name: string) {
     },
     async readySocket() {
       await expect
-        .poll(() => socketFrames.some((frame) => frame.includes('SYNC_CONNECTED')))
+        .poll(() => socketFrames.some((frame) => frame.includes('SYNC_CONNECTED')), pollOptions)
         .toBe(true);
     },
   };
@@ -231,13 +232,32 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  for (const { database, engine, actualSockets } of devices) {
-    engine.stop();
-    for (const socket of actualSockets) socket.close();
-    await database.close();
+  for (const { engine } of devices) engine.stop();
+  try {
+    await Promise.all(
+      devices.flatMap(({ actualSockets }) =>
+        actualSockets.map(async (socket) => {
+          if (socket.readyState === WebSocket.CLOSED) return;
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('WebSocket did not close')), 15_000);
+            socket.addEventListener(
+              'close',
+              () => {
+                clearTimeout(timeout);
+                resolve();
+              },
+              { once: true },
+            );
+            socket.close();
+          });
+        }),
+      ),
+    );
+  } finally {
+    await Promise.all(devices.map(({ database }) => database.close()));
+    await runtime?.dispose();
   }
-  await runtime?.dispose();
-});
+}, 25_000);
 
 describe('mobile SQLite and HouseholdHub on Miniflare', () => {
   let owner: Awaited<ReturnType<typeof makeDevice>>;
@@ -247,10 +267,35 @@ describe('mobile SQLite and HouseholdHub on Miniflare', () => {
     owner = await addDevice('owner');
     const offlinePhoto = await owner.addPhoto('offline-photo');
     await owner.local(`${shopping}/items`, 'POST', { ingredientName: '离线米饭', version: 1 });
-    await owner.engine.initOwner(
+    let interrupted = false;
+    owner.intercept(async (url, response, request) => {
+      if (url.pathname !== '/api/sync/init-upload' || response.status !== 200 || interrupted)
+        return;
+      if (JSON.parse(String(request?.body)).page !== 1) return;
+      interrupted = true;
+      throw new TypeError('simulated network disconnect after accepting the page');
+    });
+    const init = await owner.engine.initOwner(
       { bootstrapSecret: BOOTSTRAP_SECRET, nickname: '馆主' },
       { origin: ORIGIN },
     );
+    expect(init.initialized).toBe(false);
+    expect((await owner.engine.status()).epoch).toBe(0);
+    expect(await rows(owner.database, 'ShoppingListItem')).toMatchObject([
+      { ingredientNameSnapshot: '离线米饭' },
+    ]);
+    expect(await owner.database.query('SELECT page FROM sync_init_pages')).not.toEqual([]);
+    await owner.engine.handleEpochReset(1);
+    expect(await rows(owner.database, 'ShoppingListItem')).toHaveLength(1);
+    const current = await owner.local<{ version: number }>(shopping);
+    await owner.local(`${shopping}/items`, 'POST', {
+      ingredientName: '断网后加购',
+      version: current.version,
+    });
+    owner.intercept(undefined);
+    await owner.engine.syncOnce();
+    expect(await owner.engine.status()).toMatchObject({ epoch: 1, phase: 'ok' });
+    expect(await owner.database.query('SELECT page FROM sync_init_pages')).toEqual([]);
     await noOutbox(owner.database);
     const ownerToken = await owner.token();
     member = await addDevice('member');
@@ -289,7 +334,7 @@ describe('mobile SQLite and HouseholdHub on Miniflare', () => {
       (await rows(member.database, 'ShoppingListItem'))
         .map((row) => row.ingredientNameSnapshot)
         .sort(),
-    ).toEqual(['分页期间加购', '离线米饭'].sort());
+    ).toEqual(['分页期间加购', '断网后加购', '离线米饭'].sort());
     await noOutbox(member.database);
 
     for (const table of SYNC_SNAPSHOT_TABLES) {
@@ -319,7 +364,7 @@ describe('mobile SQLite and HouseholdHub on Miniflare', () => {
     expect(await rows(owner.database, 'ShoppingListItem')).toEqual(
       await rows(member.database, 'ShoppingListItem'),
     );
-    expect(await rows(owner.database, 'ShoppingListItem')).toHaveLength(3);
+    expect(await rows(owner.database, 'ShoppingListItem')).toHaveLength(4);
     expect(
       (await rows(owner.database, 'ShoppingListItem')).find(({ id }) => id === items[0]!.id)
         ?.completed,
@@ -524,7 +569,7 @@ describe('mobile SQLite and HouseholdHub on Miniflare', () => {
     await banned.readySocket();
     expect((await revoke(runtime, await owner.token(), binding.binding.memberId)).status).toBe(204);
     await expect
-      .poll(() => banned.revocations)
+      .poll(() => banned.revocations, pollOptions)
       .toContainEqual({
         memberId: binding.binding.memberId,
         source: 'websocket',
@@ -537,9 +582,12 @@ describe('mobile SQLite and HouseholdHub on Miniflare', () => {
     });
     expect(refused.status).toBe(403);
 
+    member.socketFrames.length = 0;
+    member.engine.start();
+    await member.engine.wake();
+    await member.readySocket();
     const { version } = await member.local<{ version: number }>(shopping);
     await member.local(`${shopping}/items`, 'POST', { version, ingredientName: '旧代际离线土豆' });
-    await member.readySocket();
     const { blob } = await exportBackup(owner.database, { files: owner.files });
     expect((await member.restore(blob)).status).toBe(403);
     expect((await owner.restore(blob)).status).toBe(401);
@@ -560,9 +608,9 @@ describe('mobile SQLite and HouseholdHub on Miniflare', () => {
     expect(await owner.files.readFile({ path: asset.thumbnailPath })).toEqual({ data: thumb });
     expect((await owner.restore(blob, grant)).status).toBe(401);
     await expect
-      .poll(() => member.socketFrames.some((frame) => frame.includes('EPOCH_RESET')))
+      .poll(() => member.socketFrames.some((frame) => frame.includes('EPOCH_RESET')), pollOptions)
       .toBe(true);
-    await expect.poll(async () => (await member.engine.status()).epoch).toBe(2);
+    await expect.poll(async () => (await member.engine.status()).epoch, pollOptions).toBe(2);
     expect(member.backups).toHaveLength(1);
     const pending = new TextDecoder().decode(unzipSync(member.backups[0]!)['sync/pending.json']);
     expect(pending).toContain('旧代际离线土豆');
