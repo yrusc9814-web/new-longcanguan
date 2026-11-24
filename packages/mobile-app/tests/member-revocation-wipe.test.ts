@@ -1,11 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  MEMBER_REMOVED_NOTICE_KEY,
   PendingWipeIncompleteError,
-  consumeMemberRemovedNotice,
   createMemberRevocationWipe,
   isTrustedMemberRevocation,
-  readMemberRemovedNotice,
+  memberRemovedNoticeFromNative,
+  type MemberRemovedNotice,
   type WipeDependencies,
 } from '../src/sync/wipe.js';
 import type { GateState, LocalDataPurgeReport } from '../src/native/app-security.js';
@@ -17,6 +16,7 @@ const COMPLETE: LocalDataPurgeReport = {
   databaseRemoved: true,
   uploadsRemoved: true,
   restoreRemoved: true,
+  safetyBackupsRemoved: true,
   failed: [],
 };
 
@@ -26,6 +26,7 @@ function incomplete(...failed: string[]): LocalDataPurgeReport {
     databaseRemoved: false,
     uploadsRemoved: false,
     restoreRemoved: false,
+    safetyBackupsRemoved: false,
     failed,
   };
 }
@@ -34,7 +35,7 @@ function incomplete(...failed: string[]): LocalDataPurgeReport {
  * 内存版原生门禁 + 文件世界。
  *
  * 状态存在 `world` 里，因此新建一个 wipe 实例（模拟进程重启）仍看到同一份持久状态，
- * 这正是崩溃重启用例需要的语义。
+ * 这正是崩溃重启用例需要的语义。提示也存 `world.notice`（模拟原生私有目录）。
  */
 function createHarness() {
   const world = {
@@ -43,12 +44,14 @@ function createHarness() {
     databaseOpen: true,
     uploads: ['thumb/a.webp', 'main/a.webp'],
     uploadsRestore: ['staged/b.webp'],
+    safetyBackups: ['dafan-epoch-1-to-2.zip'],
+    notice: null as MemberRemovedNotice | null,
+    webViewClearable: true,
     purges: 0,
     /** 下一次 purge 时“顺手”重新落盘的文件，用来模拟过了门禁检查的延迟写。 */
     pendingLateWrites: [] as string[],
     events: [] as string[],
   };
-  const storage = new Map<string, string>([['unrelated-cache', 'stale']]);
 
   const deps: MutableDeps = {
     async readGateState() {
@@ -61,7 +64,7 @@ function createHarness() {
         pinRequired: update.pinRequired ?? world.gate.pinRequired,
         pinUnlocked: update.pinUnlocked ?? world.gate.pinUnlocked,
       };
-      if (world.gate.lockedPendingWipe) world.gate.pinUnlocked = false;
+      if (world.gate.lockedPendingWipe || !world.gate.pinRequired) world.gate.pinUnlocked = false;
       return { ...world.gate };
     },
     async clearMemberToken() {
@@ -86,12 +89,19 @@ function createHarness() {
       }
       world.uploads = [];
       world.uploadsRestore = [];
+      world.safetyBackups = [];
       return COMPLETE;
     },
-    writeNotice(notice) {
-      world.events.push('storage:notice');
-      storage.clear();
-      storage.set(MEMBER_REMOVED_NOTICE_KEY, JSON.stringify(notice));
+    async clearWebViewData() {
+      world.events.push('webview:clear');
+      return world.webViewClearable;
+    },
+    async readNotice() {
+      return world.notice;
+    },
+    async writeNotice(notice) {
+      world.events.push('notice:write');
+      world.notice = { ...notice };
     },
     resetDatabase() {
       world.events.push('db:reset');
@@ -99,62 +109,83 @@ function createHarness() {
     now: () => NOW,
   };
 
-  return { world, storage, deps };
+  return { world, deps };
 }
 
-type NoticeStorage = Pick<Storage, 'getItem' | 'removeItem'>;
-
-/** 测试里需要替换个别步骤；生产契约保持只读。 */
 type MutableDeps = { -readonly [K in keyof WipeDependencies]: WipeDependencies[K] };
 
-function asStorage(store: Map<string, string>): NoticeStorage {
-  return {
-    getItem: (key) => store.get(key) ?? null,
-    removeItem: (key) => void store.delete(key),
-  };
-}
-
 describe('撤权清退状态机', () => {
-  it('先持久门禁再删除，顺序固定且清退后保持锁定', async () => {
-    const { world, storage, deps } = createHarness();
+  it('先持久门禁再删除，顺序固定，成功后当场解锁并重建空库', async () => {
+    const { world, deps } = createHarness();
     const wipe = createMemberRevocationWipe(deps);
 
     const outcome = await wipe.wipe({ householdId: 'hh-1', memberId: 'm-1' });
 
     expect(outcome.status).toBe('wiped');
-    // 门禁与令牌先于任何删除动作。
+    expect(outcome.unlocked).toBe(true);
+    // 门禁与令牌先于任何删除动作；提示在擦除前就落盘，崩溃也能读出真实身份。
     expect(world.events[0]).toBe('gate:{"lockedPendingWipe":true,"pinUnlocked":false}');
     expect(world.events[1]).toBe('token:clear');
+    expect(world.events[2]).toBe('notice:write');
     expect(world.events.indexOf('sync:stop')).toBeLessThan(world.events.indexOf('db:close'));
     expect(world.events.indexOf('db:close')).toBeLessThan(world.events.indexOf('purge'));
+    expect(world.events.indexOf('purge')).toBeLessThan(world.events.indexOf('webview:clear'));
     expect(world.purges).toBe(2);
 
     expect(world.token).toBeNull();
     expect(world.databaseOpen).toBe(false);
     expect(world.uploads).toEqual([]);
     expect(world.uploadsRestore).toEqual([]);
-    // 在线清退完成后仍锁定：解锁只发生在冷启动补完里。
-    expect(world.gate.lockedPendingWipe).toBe(true);
-    expect(storage.get('unrelated-cache')).toBeUndefined();
-    expect(readMemberRemovedNotice(asStorage(storage))).toEqual({
+    expect(world.safetyBackups).toEqual([]);
+    // 在线清退完成后立即解锁：用户无需强杀进程即可继续使用单机版。
+    expect(world.gate).toEqual({
+      lockedPendingWipe: false,
+      pinRequired: false,
+      pinUnlocked: false,
+    });
+    expect(world.events.at(-1)).toBe('db:reset');
+    expect(world.notice).toEqual({
       version: 1,
       householdId: 'hh-1',
       memberId: 'm-1',
       wipedAt: NOW.toISOString(),
     });
+    expect(world.events.filter((event) => event === 'notice:write')).toHaveLength(1);
   });
 
-  it('物理删除不完整时抛错、保持锁定、不写提示也不 reset 数据库', async () => {
-    const { world, storage, deps } = createHarness();
+  it('物理删除不完整时抛错、保持锁定、不解锁也不 reset 数据库', async () => {
+    const { world, deps } = createHarness();
     world.pendingLateWrites = ['thumb/a.webp'];
     const wipe = createMemberRevocationWipe(deps);
 
     await expect(wipe.wipe()).rejects.toBeInstanceOf(PendingWipeIncompleteError);
 
     expect(world.gate.lockedPendingWipe).toBe(true);
-    expect(world.events).not.toContain('storage:notice');
+    expect(world.events).not.toContain('webview:clear');
     expect(world.events).not.toContain('db:reset');
-    expect(storage.get(MEMBER_REMOVED_NOTICE_KEY)).toBeUndefined();
+    expect(
+      world.events.some(
+        (event) => event.startsWith('gate:') && event.includes('"lockedPendingWipe":false'),
+      ),
+    ).toBe(false);
+  });
+
+  it('WebView 清理失败时保持锁定，重试后完成', async () => {
+    const { world, deps } = createHarness();
+    world.webViewClearable = false;
+    const wipe = createMemberRevocationWipe(deps);
+
+    await expect(wipe.wipe({ householdId: 'hh-1', memberId: 'm-1' })).rejects.toBeInstanceOf(
+      PendingWipeIncompleteError,
+    );
+    expect(world.gate.lockedPendingWipe).toBe(true);
+    expect(world.events).not.toContain('db:reset');
+
+    world.webViewClearable = true;
+    await expect(wipe.wipe({ householdId: 'hh-1', memberId: 'm-1' })).resolves.toMatchObject({
+      unlocked: true,
+    });
+    expect(world.gate.lockedPendingWipe).toBe(false);
   });
 
   it('延迟写复活后重试安全，最终不留文件', async () => {
@@ -168,7 +199,8 @@ describe('撤权清退状态机', () => {
 
     expect(world.uploads).toEqual([]);
     expect(world.uploadsRestore).toEqual([]);
-    expect(world.gate.lockedPendingWipe).toBe(true);
+    expect(world.safetyBackups).toEqual([]);
+    expect(world.gate.lockedPendingWipe).toBe(false);
     expect(world.token).toBeNull();
   });
 
@@ -195,26 +227,55 @@ describe('撤权清退状态机', () => {
     expect(world.uploads).toHaveLength(2);
     expect(world.token).toBe('member-token');
   });
+
+  it('未带身份时不覆盖已持久化的真实身份', async () => {
+    const { world, deps } = createHarness();
+    world.notice = {
+      version: 1,
+      householdId: 'hh-real',
+      memberId: 'm-real',
+      wipedAt: '2026-03-01T00:00:00.000Z',
+    };
+    const wipe = createMemberRevocationWipe(deps);
+
+    const outcome = await wipe.wipe();
+
+    expect(outcome.notice).toMatchObject({ householdId: 'hh-real', memberId: 'm-real' });
+    expect(world.notice).toMatchObject({ householdId: 'hh-real', memberId: 'm-real' });
+  });
 });
 
 describe('冷启动补完（模拟清退中途崩溃）', () => {
-  it('锁住时先补完擦除再解锁并重建空库', async () => {
-    const { world, storage, deps } = createHarness();
-    // 崩溃现场：门禁已持久化、令牌已清，但文件与连接仍在。
+  it('锁住时补完擦除并解锁，重建空库并保留原生身份', async () => {
+    const { world, deps } = createHarness();
+    // 崩溃现场：门禁已持久化、令牌已清、提示已落盘，但文件与连接仍在。
     world.gate = { lockedPendingWipe: true, pinRequired: true, pinUnlocked: false };
+    world.notice = {
+      version: 1,
+      householdId: 'hh-crash',
+      memberId: 'm-crash',
+      wipedAt: '2026-03-02T00:00:00.000Z',
+    };
 
     const restarted = createMemberRevocationWipe(deps);
     await expect(restarted.recoverAtStartup()).resolves.toBe('recovered');
 
     expect(world.uploads).toEqual([]);
     expect(world.uploadsRestore).toEqual([]);
+    expect(world.safetyBackups).toEqual([]);
     expect(world.events).toContain('db:reset');
     expect(world.gate).toEqual({
       lockedPendingWipe: false,
       pinRequired: false,
       pinUnlocked: false,
     });
-    expect(readMemberRemovedNotice(asStorage(storage))).not.toBeNull();
+    // 冷启动补完不得用空身份覆盖已持久化的 householdId/memberId。
+    expect(world.notice).toEqual({
+      version: 1,
+      householdId: 'hh-crash',
+      memberId: 'm-crash',
+      wipedAt: '2026-03-02T00:00:00.000Z',
+    });
   });
 
   it('未处于 lockedPendingWipe 时跳过，不删除任何数据', async () => {
@@ -239,7 +300,6 @@ describe('冷启动补完（模拟清退中途崩溃）', () => {
     await expect(first.recoverAtStartup()).rejects.toBeInstanceOf(PendingWipeIncompleteError);
     expect(world.gate.lockedPendingWipe).toBe(true);
     expect(world.events).not.toContain('db:reset');
-    expect(world.events).not.toContain('storage:notice');
 
     // 再次重启：删除恢复正常后补完，说明锁定状态可安全重试。
     deps.purgeLocalData = async () => {
@@ -252,29 +312,27 @@ describe('冷启动补完（模拟清退中途崩溃）', () => {
   });
 });
 
-describe('一次性被移出提示', () => {
-  it('读取后即删除，只出现一次', () => {
-    const store = new Map<string, string>();
-    store.set(
-      MEMBER_REMOVED_NOTICE_KEY,
-      JSON.stringify({ version: 1, householdId: 'hh', memberId: 'm', wipedAt: NOW.toISOString() }),
-    );
-    const storage = asStorage(store);
-
-    expect(consumeMemberRemovedNotice(storage)?.memberId).toBe('m');
-    expect(consumeMemberRemovedNotice(storage)).toBeNull();
+describe('原生一次性被移出提示载荷校验', () => {
+  it('当前版本且 wipedAt 非空时可用', () => {
+    expect(
+      memberRemovedNoticeFromNative({
+        version: 1,
+        householdId: 'hh',
+        memberId: 'm',
+        wipedAt: NOW.toISOString(),
+      }),
+    ).toEqual({ version: 1, householdId: 'hh', memberId: 'm', wipedAt: NOW.toISOString() });
   });
 
-  it('损坏或旧版本内容视为无提示', () => {
-    const broken: NoticeStorage = { getItem: () => '{not json', removeItem: () => undefined };
-    const legacy: NoticeStorage = {
-      getItem: () => JSON.stringify({ version: 0, wipedAt: NOW.toISOString() }),
-      removeItem: () => undefined,
-    };
-
-    expect(readMemberRemovedNotice(broken)).toBeNull();
-    expect(readMemberRemovedNotice(legacy)).toBeNull();
-    expect(readMemberRemovedNotice(undefined)).toBeNull();
+  it('缺身份字段时归 null，损坏或旧版本视为无提示', () => {
+    expect(memberRemovedNoticeFromNative({ version: 1, wipedAt: NOW.toISOString() })).toMatchObject(
+      { householdId: null, memberId: null },
+    );
+    expect(memberRemovedNoticeFromNative({ version: 0, wipedAt: NOW.toISOString() })).toBeNull();
+    expect(memberRemovedNoticeFromNative({ version: 1 })).toBeNull();
+    expect(memberRemovedNoticeFromNative({ version: 1, wipedAt: '' })).toBeNull();
+    expect(memberRemovedNoticeFromNative(null)).toBeNull();
+    expect(memberRemovedNoticeFromNative('notice')).toBeNull();
   });
 });
 
@@ -332,6 +390,7 @@ describe('bootstrap 接线', () => {
     const bootstrap = await import('../src/local-api/bootstrap.js');
     expect(typeof bootstrap.handleTrustedMemberRevocation).toBe('function');
     expect(typeof bootstrap.memberRevocationWipe.recoverAtStartup).toBe('function');
+    expect(typeof bootstrap.consumeMemberRemovedNotice).toBe('function');
 
     const stop = vi.fn();
     await bootstrap.handleTrustedMemberRevocation(stop, { householdId: 'hh', memberId: 'm' });

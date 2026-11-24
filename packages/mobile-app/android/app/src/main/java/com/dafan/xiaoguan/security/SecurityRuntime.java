@@ -23,7 +23,10 @@ public final class SecurityRuntime {
     private final SecurityGateService gateService;
     private final File uploadsDirectory;
     private final LocalDataPurge localDataPurge;
+    private final SafetyBackupStore safetyBackupStore;
+    private final MemberRemovedNoticeStore noticeStore;
     private volatile boolean pendingWipeProfilePurged;
+    private volatile boolean runtimeWebViewCleared;
 
     private SecurityRuntime(Context context) {
         Context app = context.getApplicationContext();
@@ -32,6 +35,14 @@ public final class SecurityRuntime {
         this.tokenStore = new MemberTokenStore(new KeystoreMemberTokenStorage(securityDir));
         this.gateService = new SecurityGateService(gateStore, tokenStore);
         this.uploadsDirectory = new File(app.getFilesDir(), "uploads");
+        // Safety backups live beside uploads but in their own private tree, so the uploads restore
+        // swap can never delete them; the revocation purge still erases them.
+        this.safetyBackupStore = new SafetyBackupStore(
+            new File(app.getFilesDir(), SafetyBackupStore.DIRECTORY)
+        );
+        this.noticeStore = new MemberRemovedNoticeStore(
+            new File(securityDir, "member-removed-notice.json")
+        );
         // Both roots come from the Context once; the bridge never receives a path.
         File databaseDirectory = new File(app.getFilesDir().getParentFile(), "databases");
         this.localDataPurge = new LocalDataPurge(databaseDirectory, app.getFilesDir());
@@ -76,6 +87,14 @@ public final class SecurityRuntime {
         return uploadsDirectory;
     }
 
+    public SafetyBackupStore safetyBackupStore() {
+        return safetyBackupStore;
+    }
+
+    public MemberRemovedNoticeStore noticeStore() {
+        return noticeStore;
+    }
+
     /** Called once per process before the first WebView is created. */
     public void preparePendingWipeProfile(Context context) {
         if (gateStore.get().lockedPendingWipe()) {
@@ -88,8 +107,24 @@ public final class SecurityRuntime {
         return pendingWipeProfilePurged;
     }
 
+    /**
+     * Records that the running process cleared the live WebView's storage and cache itself.
+     *
+     * <p>This is what makes an online revocation self-healing: the gate may be released without a
+     * process restart because the profile was scrubbed in place. The flag is process-scoped and is
+     * dropped together with the pending wipe.</p>
+     */
+    public void markRuntimeWebViewCleared(boolean cleared) {
+        runtimeWebViewCleared = cleared;
+    }
+
+    public boolean runtimeWebViewCleared() {
+        return runtimeWebViewCleared;
+    }
+
     void finishPendingWipe() {
         pendingWipeProfilePurged = false;
+        runtimeWebViewCleared = false;
     }
 
     /** Fixed-root physical erasure service; no caller-supplied paths. */

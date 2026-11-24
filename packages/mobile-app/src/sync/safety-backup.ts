@@ -116,19 +116,36 @@ export interface SafetyBackupStore {
   write(backup: SafetyBackup): Promise<string>;
 }
 
-import type { UploadsFilesBridge } from '../native/upload-files.js';
-
-export type SafetyBackupFiles = Pick<UploadsFilesBridge, 'writeFile'> & {
+export interface SafetyBackupFiles {
+  /**
+   * 原生独立私有目录 `FilesDir/safety-backups/` 的写入口。
+   *
+   * 该目录不在 `uploads/`、`uploads-restore/` 之下，整库恢复替换上传目录时不会删掉它；
+   * 被踢清退时由原生 `LocalDataPurge` 一并擦除。原生实现必须提供，缺省直接失败。
+   */
   writeSafetyBackup?(options: { name: string; data: Uint8Array }): Promise<void>;
-};
+}
 
-/** 备份位于原生私有目录，和上传目录的替换互相独立。 */
+export const SAFETY_BACKUP_DIRECTORY = 'safety-backups';
+
+/** 文件名只允许单层 `[A-Za-z0-9._-]+.zip`，与原生 `SafetyBackupStore` 的校验一致。 */
+export function safetyBackupFileName(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z0-9._-]/g, '_');
+  return cleaned.endsWith('.zip') ? cleaned : `${cleaned}.zip`;
+}
+
+/**
+ * 默认写入原生独立私有目录 `FilesDir/safety-backups/`。
+ *
+ * 不退回 `uploads/` 同源写入口：那条路径会被 `UploadsRestore` 的整库替换覆盖或丢弃。
+ */
 export function createSafetyBackupStore(files: SafetyBackupFiles): SafetyBackupStore {
   return {
     async write(backup) {
-      if (!files.writeSafetyBackup) throw new Error('安全备份存储不可用');
-      await files.writeSafetyBackup({ name: backup.name, data: backup.bytes });
-      return backup.name;
+      const name = safetyBackupFileName(backup.name);
+      if (!files.writeSafetyBackup) throw new Error('原生安全备份写入口不可用');
+      await files.writeSafetyBackup({ name, data: backup.bytes });
+      return `${SAFETY_BACKUP_DIRECTORY}/${name}`;
     },
   };
 }

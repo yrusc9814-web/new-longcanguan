@@ -26,6 +26,13 @@ export interface UploadsFilesBridge {
   writeRestoreFile(options: FileWrite): Promise<void>;
   activateRestore(options: RestoreMarker): Promise<void>;
   recoverRestore(options: RestoreMarker): Promise<void>;
+  /**
+   * 把安全备份写入原生独立私有目录 `FilesDir/safety-backups/`。
+   *
+   * 该目录不在 `uploads/` 与 `uploads-restore/` 之下，因此整库恢复的目录替换不会删掉它；
+   * 被踢清退时由原生 `LocalDataPurge` 一并擦除。原生实现必须存在（不做静默降级）。
+   */
+  writeSafetyBackup?(options: { name: string; data: Uint8Array }): Promise<void>;
 }
 
 function validRelativePath(path: string): boolean {
@@ -39,6 +46,8 @@ export function createMemoryUploadsFiles(): UploadsFilesBridge {
   let files = new Map<string, Uint8Array>();
   let staged: Map<string, Uint8Array> | undefined;
   let pending: { id: number; previous: Map<string, Uint8Array> } | undefined;
+  // 独立备份区：整库恢复替换 uploads 时不会被覆盖/回滚，与原生 `safety-backups/` 语义一致。
+  const backups = new Map<string, Uint8Array>();
 
   function write(target: Map<string, Uint8Array>, { path, data }: FileWrite) {
     if (!validRelativePath(path) || data.length === 0) throw new Error('无效的上传文件');
@@ -84,16 +93,26 @@ export function createMemoryUploadsFiles(): UploadsFilesBridge {
       pending = undefined;
       staged = undefined;
     },
+    async writeSafetyBackup({ name, data }) {
+      if (!validSafetyBackupName(name) || data.length === 0) throw new Error('无效的安全备份');
+      backups.set(name, data.slice());
+    },
   };
+}
+
+/** 与原生 `SafetyBackupStore.NAME` 同一条约束：单层文件名、固定后缀、无路径段。 */
+export function validSafetyBackupName(name: string): boolean {
+  return /^[A-Za-z0-9._-]{1,120}\.zip$/.test(name);
 }
 
 type NativeUploadsFiles = Omit<
   UploadsFilesBridge,
-  'readFile' | 'writeFile' | 'writeRestoreFile'
+  'readFile' | 'writeFile' | 'writeRestoreFile' | 'writeSafetyBackup'
 > & {
   readFile(options: { path: string }): Promise<{ data?: string | null }>;
   writeFile(options: { path: string; dataBase64: string }): Promise<void>;
   writeRestoreFile(options: { path: string; dataBase64: string }): Promise<void>;
+  writeSafetyBackup(options: { name: string; dataBase64: string }): Promise<void>;
 };
 
 export function decodeBase64(data: string): Uint8Array<ArrayBuffer> {
@@ -129,6 +148,8 @@ function createNativeUploadsFiles(): UploadsFilesBridge {
       plugin.writeRestoreFile({ path, dataBase64: encodeBase64(data) }),
     activateRestore: (options) => plugin.activateRestore(options),
     recoverRestore: (options) => plugin.recoverRestore(options),
+    writeSafetyBackup: ({ name, data }) =>
+      plugin.writeSafetyBackup({ name, dataBase64: encodeBase64(data) }),
   };
 }
 

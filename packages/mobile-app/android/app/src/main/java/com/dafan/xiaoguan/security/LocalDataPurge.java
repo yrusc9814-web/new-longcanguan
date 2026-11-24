@@ -12,7 +12,7 @@ import java.util.List;
  * can never point this class at another location. Only these names are ever touched:</p>
  * <ul>
  *     <li>{@code dafanSQLite.db} plus its {@code -wal}/{@code -shm}/{@code -journal} siblings</li>
- *     <li>{@code uploads/} and {@code uploads-restore/} trees</li>
+ *     <li>{@code uploads/}, {@code uploads-restore/} and {@code safety-backups/} trees</li>
  * </ul>
  *
  * <p>Deletion runs twice and is then verified, which closes the window where a request that passed
@@ -28,6 +28,7 @@ public final class LocalDataPurge {
     private static final String[] DATABASE_SUFFIXES = {"", "-wal", "-shm", "-journal"};
     private static final String UPLOADS = "uploads";
     private static final String UPLOADS_RESTORE = "uploads-restore";
+    private static final String SAFETY_BACKUPS = SafetyBackupStore.DIRECTORY;
 
     private final File databaseDirectory;
     private final File filesDirectory;
@@ -57,8 +58,16 @@ public final class LocalDataPurge {
         if (!uploadsRemoved) failed.add(UPLOADS);
         boolean restoreRemoved = !new File(filesDirectory, UPLOADS_RESTORE).exists();
         if (!restoreRemoved) failed.add(UPLOADS_RESTORE);
+        boolean safetyBackupsRemoved = !new File(filesDirectory, SAFETY_BACKUPS).exists();
+        if (!safetyBackupsRemoved) failed.add(SAFETY_BACKUPS);
 
-        return new PurgeReport(databaseRemoved, uploadsRemoved, restoreRemoved, failed);
+        return new PurgeReport(
+            databaseRemoved,
+            uploadsRemoved,
+            restoreRemoved,
+            safetyBackupsRemoved,
+            failed
+        );
     }
 
     private void deleteTargets() {
@@ -72,6 +81,7 @@ public final class LocalDataPurge {
         }
         deleteTree(new File(filesDirectory, UPLOADS));
         deleteTree(new File(filesDirectory, UPLOADS_RESTORE));
+        deleteTree(new File(filesDirectory, SAFETY_BACKUPS));
     }
 
     /** Clears Chromium's private profile before Android instantiates a WebView. */
@@ -115,17 +125,25 @@ public final class LocalDataPurge {
         private final boolean databaseRemoved;
         private final boolean uploadsRemoved;
         private final boolean restoreRemoved;
+        private final boolean safetyBackupsRemoved;
         private final List<String> failed;
 
-        PurgeReport(boolean databaseRemoved, boolean uploadsRemoved, boolean restoreRemoved, List<String> failed) {
+        PurgeReport(
+            boolean databaseRemoved,
+            boolean uploadsRemoved,
+            boolean restoreRemoved,
+            boolean safetyBackupsRemoved,
+            List<String> failed
+        ) {
             this.databaseRemoved = databaseRemoved;
             this.uploadsRemoved = uploadsRemoved;
             this.restoreRemoved = restoreRemoved;
+            this.safetyBackupsRemoved = safetyBackupsRemoved;
             this.failed = new ArrayList<>(failed);
         }
 
         public boolean complete() {
-            return databaseRemoved && uploadsRemoved && restoreRemoved;
+            return databaseRemoved && uploadsRemoved && restoreRemoved && safetyBackupsRemoved;
         }
 
         public boolean databaseRemoved() {
@@ -138,6 +156,10 @@ public final class LocalDataPurge {
 
         public boolean restoreRemoved() {
             return restoreRemoved;
+        }
+
+        public boolean safetyBackupsRemoved() {
+            return safetyBackupsRemoved;
         }
 
         public List<String> failed() {

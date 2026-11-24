@@ -1,18 +1,17 @@
 /**
  * 可信撤权后的本地自清退状态机（`LOCKED_PENDING_WIPE`）。
  *
- * 三件事必须同时成立才算清退完成：
+ * 在线被踢后必须当场自愈，三件事同时成立才算清退完成：
  * 1. 持久门禁已写入 `lockedPendingWipe` 且 Keystore `memberToken` 已清；
- * 2. SQLite 连接已关闭、`dafanSQLite.db`/`-wal`/`-shm`、`uploads/`、`uploads-restore/` 已确认不存在；
- * 3. 本地存储已清空，只留下一次性提示标记，同步器/WS 已停用。
+ * 2. SQLite 连接已关闭，`dafanSQLite.db`/`-wal`/`-shm`、`uploads/`、`uploads-restore/`、
+ *    `safety-backups/` 已确认不存在；
+ * 3. 当前进程的 WebView 存储与缓存已清理，一次性被移出提示已写入原生私有目录。
  *
- * 任何一步失败都保持锁定并把错误抛给调用方，下一次调用从头重跑（全部步骤幂等）。
- * 只有冷启动补完流程会在擦除完整成功后解锁门禁并重建空库。
+ * 全部成功后才把门禁解锁回 `{lockedPendingWipe:false, pinRequired:false, pinUnlocked:false}` 并重建空库，
+ * 用户无需强杀进程即可继续使用干净的单机版。任一步失败都保持锁定并抛出，下一次调用（在线重试或冷启动补完）
+ * 从头重跑；冷启动补完不得覆盖已经持久化的 `householdId`/`memberId`。
  */
 import type { GateState, GateUpdate, LocalDataPurgeReport } from '../native/app-security.js';
-
-/** 一次性提示标记的 key；UI 读取后应自行删除。 */
-export const MEMBER_REMOVED_NOTICE_KEY = 'dafan.memberRemovedNotice';
 
 export const MEMBER_REMOVED_NOTICE_VERSION = 1;
 
@@ -32,6 +31,8 @@ export interface WipeOutcome {
   readonly status: 'wiped';
   readonly report: LocalDataPurgeReport;
   readonly notice: MemberRemovedNotice;
+  /** 清退后门禁已解锁并重建空库，可直接恢复单机读写。 */
+  readonly unlocked: true;
 }
 
 export interface WipeDependencies {
@@ -44,8 +45,12 @@ export interface WipeDependencies {
   readonly closeDatabase: () => Promise<void>;
   /** 原生物理删除固定私有目录；不接受调用方路径。 */
   readonly purgeLocalData: () => Promise<LocalDataPurgeReport>;
-  /** 清空本地存储并写入一次性提示标记。 */
-  readonly writeNotice: (notice: MemberRemovedNotice) => void;
+  /** 主线程清理在跑 WebView 的 localStorage/cookie/缓存；返回 false 即视为擦除未完成。 */
+  readonly clearWebViewData: () => Promise<boolean>;
+  /** 读取已持久化的原生提示（冷启动补完用来保留真实身份）。 */
+  readonly readNotice: () => Promise<MemberRemovedNotice | null>;
+  /** 写入原生一次性提示；写入失败保持锁定。 */
+  readonly writeNotice: (notice: MemberRemovedNotice) => Promise<void> | void;
   /** 丢弃数据库缓存，让下一次 `getDatabase()` 重建全新空库。 */
   readonly resetDatabase: () => void;
   readonly now?: () => Date;
@@ -64,6 +69,12 @@ export class PendingWipeIncompleteError extends Error {
   }
 }
 
+const UNLOCKED_GATE: GateUpdate = {
+  lockedPendingWipe: false,
+  pinRequired: false,
+  pinUnlocked: false,
+};
+
 function noticeFor(identity: RevocationIdentity | undefined, now: () => Date): MemberRemovedNotice {
   return {
     version: MEMBER_REMOVED_NOTICE_VERSION,
@@ -73,77 +84,35 @@ function noticeFor(identity: RevocationIdentity | undefined, now: () => Date): M
   };
 }
 
-export interface MemberRevocationWipe {
-  /** 在线清退：上锁 + 擦除，成功后仍保持锁定，等待启动补完解锁。 */
-  wipe(identity?: RevocationIdentity): Promise<WipeOutcome>;
-  /**
-   * 启动/首次探测补完：仅当 `lockedPendingWipe === true` 时重跑擦除，完整成功后解锁并重建空库。
-   * 擦除失败保持锁定并抛出，绝不降级放行。
-   */
-  recoverAtStartup(): Promise<'skipped' | 'recovered'>;
-  readonly isWiping: boolean;
-}
-
-export function createMemberRevocationWipe(deps: WipeDependencies): MemberRevocationWipe {
-  const now = deps.now ?? (() => new Date());
-  let inFlight: Promise<WipeOutcome> | undefined;
-
-  async function execute(identity?: RevocationIdentity): Promise<WipeOutcome> {
-    // ① 持久化原生门禁并清 Keystore 令牌。二者都在任何删除之前，失败也不会有数据被删。
-    await deps.applyGateState({ lockedPendingWipe: true, pinUnlocked: false });
-    await deps.clearMemberToken();
-    // ② 停用同步器/WS，再关闭 SQLite（close 排队在写锁之后，等在途事务结束）。
-    await deps.stopBackground();
-    await deps.closeDatabase();
-    // ③ 原生物理删除并校验；跑两遍，让“门禁落地前已通过检查”的在途写入无法在下一轮复活。
-    const first = await deps.purgeLocalData();
-    if (!first.complete) throw new PendingWipeIncompleteError(first);
-    const second = await deps.purgeLocalData();
-    if (!second.complete) throw new PendingWipeIncompleteError(second);
-    // ④ 确认擦除后才清存储并落下一次性标记；此后门禁已锁，任何后续写入都会被原生拒绝。
-    const notice = noticeFor(identity, now);
-    deps.writeNotice(notice);
-    return { status: 'wiped', report: second, notice };
-  }
-
+function incompleteAfter(report: LocalDataPurgeReport, artifact: string): LocalDataPurgeReport {
   return {
-    get isWiping() {
-      return inFlight !== undefined;
-    },
-    wipe(identity) {
-      inFlight ??= execute(identity).finally(() => {
-        inFlight = undefined;
-      });
-      return inFlight;
-    },
-    async recoverAtStartup() {
-      const state = await deps.readGateState();
-      if (!state.lockedPendingWipe) return 'skipped';
-      await this.wipe();
-      // 擦除完整成功后才解锁；`pinRequired` 归零，交给新库的 PIN 配置重新决定。
-      await deps.applyGateState({
-        lockedPendingWipe: false,
-        pinRequired: false,
-        pinUnlocked: false,
-      });
-      deps.resetDatabase();
-      return 'recovered';
-    },
+    ...report,
+    complete: false,
+    failed: [...report.failed, artifact],
   };
 }
 
 /**
- * 唯一触发条件判定（供同步代理在收到 403/WS 帧时调用）。
- *
- * 只有来自当前绑定 `cloudOrigin` 的 `MEMBER_REVOKED`、`householdId`/`memberId` 均匹配当前
- * `device_local_config`、且请求发起时捕获的 `bindingGeneration` 仍是当前最新代际时才返回 true。
- * 本地 PIN 401、换机 401、`403 FORBIDDEN`、`429`、5xx/断网、旧代际迟到响应一律 false。
+ * 校验原生桥返回的提示载荷；只接受当前版本且 `wipedAt` 非空的记录，其余视为无提示。
  */
+export function memberRemovedNoticeFromNative(value: unknown): MemberRemovedNotice | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const candidate = value as Partial<MemberRemovedNotice>;
+  if (candidate.version !== MEMBER_REMOVED_NOTICE_VERSION) return null;
+  if (typeof candidate.wipedAt !== 'string' || candidate.wipedAt === '') return null;
+  return {
+    version: MEMBER_REMOVED_NOTICE_VERSION,
+    householdId: typeof candidate.householdId === 'string' ? candidate.householdId : null,
+    memberId: typeof candidate.memberId === 'string' ? candidate.memberId : null,
+    wipedAt: candidate.wipedAt,
+  };
+}
+
 export interface MemberRevocationSignal {
   readonly code: string;
   readonly householdId?: unknown;
   readonly memberId?: unknown;
-  /** 响应类型：HTTP 403 与 WS 帧都允许，其它状态码必须为 false。 */
+  /** 相应类停靠 HTTP 403 与 WS 帧都接受，其它状态码必须为 false。 */
   readonly transport: 'http' | 'ws';
   readonly status?: number;
 }
@@ -152,7 +121,7 @@ export interface RevocationContext {
   readonly householdId: string | null;
   readonly memberId: string | null;
   readonly bindingGeneration: number;
-  /** 请求发起时捕获的代际。 */
+  /** 请求发起时刻获得的代际。 */
   readonly requestGeneration: number;
 }
 
@@ -168,44 +137,72 @@ export function isTrustedMemberRevocation(
   return context.requestGeneration === context.bindingGeneration;
 }
 
-/** 读取一次性提示标记；内容损坏时返回 null。 */
-export function readMemberRemovedNotice(
-  storage: Pick<Storage, 'getItem'> | null | undefined,
-): MemberRemovedNotice | null {
-  if (!storage) return null;
-  let raw: string | null;
-  try {
-    raw = storage.getItem(MEMBER_REMOVED_NOTICE_KEY);
-  } catch {
-    return null;
-  }
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as Partial<MemberRemovedNotice>;
-    if (parsed.version !== MEMBER_REMOVED_NOTICE_VERSION) return null;
-    if (typeof parsed.wipedAt !== 'string') return null;
-    return {
-      version: MEMBER_REMOVED_NOTICE_VERSION,
-      householdId: typeof parsed.householdId === 'string' ? parsed.householdId : null,
-      memberId: typeof parsed.memberId === 'string' ? parsed.memberId : null,
-      wipedAt: parsed.wipedAt,
-    };
-  } catch {
-    return null;
-  }
+export interface MemberRevocationWipe {
+  /**
+   * 在线清退：上锁 → 清令牌 → 停同步 → 关库 → 双遍擦除 → 清 WebView → 写原生提示 → 解锁并重建空库。
+   * 擦除或 WebView 清理失败时保持锁定并抛出，由调用方重试或冷启动补完。
+   */
+  wipe(identity?: RevocationIdentity): Promise<WipeOutcome>;
+  /**
+   * 启动/首次探测补完：仅当 `lockedPendingWipe === true` 时重跑整套清退并解锁。
+   * 已有原生提示时保留其 `householdId`/`memberId`，绝不用空身份覆盖。
+   */
+  recoverAtStartup(): Promise<'skipped' | 'recovered'>;
+  readonly isWiping: boolean;
 }
 
-/** UI 读取提示后调用，确保提示只出现一次。 */
-export function consumeMemberRemovedNotice(
-  storage: Pick<Storage, 'getItem' | 'removeItem'> | null | undefined,
-): MemberRemovedNotice | null {
-  const notice = readMemberRemovedNotice(storage);
-  if (notice) {
-    try {
-      storage?.removeItem(MEMBER_REMOVED_NOTICE_KEY);
-    } catch {
-      // 删除失败时下一次仍会读到同一条提示，不影响数据安全。
+export function createMemberRevocationWipe(deps: WipeDependencies): MemberRevocationWipe {
+  const now = deps.now ?? (() => new Date());
+  let inFlight: Promise<WipeOutcome> | undefined;
+
+  async function execute(identity: RevocationIdentity | undefined): Promise<WipeOutcome> {
+    // ① 持久化原生门禁并清 Keystore 令牌。二者都在任何删除之前，失败也不会有数据被删。
+    await deps.applyGateState({ lockedPendingWipe: true, pinUnlocked: false });
+    await deps.clearMemberToken();
+    // ② 身份先落原生私有目录（不在擦除范围内）：清退中途被强杀后，冷启动补完仍能读出真实
+    //    `householdId`/`memberId`。本次没带身份时沿用已持久化的那份，绝不用空值覆盖。
+    const persisted = await deps.readNotice();
+    const notice = noticeFor(identity, now);
+    const identityKnown = identity?.householdId != null || identity?.memberId != null;
+    const written = identityKnown || !persisted ? notice : persisted;
+    await deps.writeNotice(written);
+    // ③ 停用同步器/WS，再关闭 SQLite（close 排队在写锁之后，等在途事务结束）。
+    await deps.stopBackground();
+    await deps.closeDatabase();
+    // ④ 原生物理删除并校验；跑两遍，让“门禁落地前已通过检查”的在途写入无法在下一轮复活。
+    const first = await deps.purgeLocalData();
+    if (!first.complete) throw new PendingWipeIncompleteError(first);
+    const second = await deps.purgeLocalData();
+    if (!second.complete) throw new PendingWipeIncompleteError(second);
+    // ⑤ 清当前进程 WebView 的 localStorage/cookie/缓存；失败说明旧会话内容仍在，必须保持锁定。
+    if (!(await deps.clearWebViewData())) {
+      throw new PendingWipeIncompleteError(incompleteAfter(second, 'webview'));
     }
+    // ⑥ 门禁解锁并丢弃旧库句柄：线上被踢当场恢复单机可用，下一次 `getDatabase()` 重建空库。
+    await deps.applyGateState(UNLOCKED_GATE);
+    deps.resetDatabase();
+    return { status: 'wiped', report: second, notice: written, unlocked: true };
   }
-  return notice;
+
+  function run(identity?: RevocationIdentity): Promise<WipeOutcome> {
+    inFlight ??= execute(identity).finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
+  }
+
+  return {
+    get isWiping() {
+      return inFlight !== undefined;
+    },
+    wipe(identity) {
+      return run(identity);
+    },
+    async recoverAtStartup() {
+      const state = await deps.readGateState();
+      if (!state.lockedPendingWipe) return 'skipped';
+      await run();
+      return 'recovered';
+    },
+  };
 }

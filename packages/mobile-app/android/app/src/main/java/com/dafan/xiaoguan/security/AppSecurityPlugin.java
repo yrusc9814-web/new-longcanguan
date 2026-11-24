@@ -9,6 +9,9 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 
 import org.json.JSONObject;
 
+import java.io.IOException;
+import java.util.Map;
+
 /**
  * JS bridge for the local security gate.
  *
@@ -18,10 +21,15 @@ import org.json.JSONObject;
  *     <li>{@code setGateState({lockedPendingWipe?, pinRequired?, pinUnlocked?})} -&gt; same shape</li>
  *     <li>{@code setMemberToken({memberToken})}, {@code getMemberToken() -&gt; {memberToken}},
  *     {@code clearMemberToken()}</li>
+ *     <li>{@code purgeLocalData()} -&gt; fixed-root erasure report</li>
+ *     <li>{@code getMemberRemovedNotice()} / {@code consumeMemberRemovedNotice()} -&gt; durable notice</li>
+ *     <li>{@code setMemberRemovedNotice({householdId, memberId, wipedAt})}</li>
+ *     <li>{@code clearWebViewData()} -&gt; {@code {cleared}} for the live WebView</li>
  * </ul>
  *
  * <p>This class only adapts Capacitor calls; all logic and its invariants live in
- * {@link SecurityGateService}. No token value is ever placed in an error message or log.</p>
+ * {@link SecurityGateService} and {@link SecurityRuntime}. No token value is ever placed in an error
+ * message or log.</p>
  */
 @CapacitorPlugin(name = "AppSecurity")
 public final class AppSecurityPlugin extends Plugin {
@@ -60,7 +68,11 @@ public final class AppSecurityPlugin extends Plugin {
         try {
             SecurityRuntime runtime = SecurityRuntime.get(getContext());
             if (Boolean.FALSE.equals(lockedPendingWipe) && runtime.gateStore().get().lockedPendingWipe()
-                && !runtime.pendingWipeProfilePurged()) {
+                && !runtime.pendingWipeProfilePurged()
+                && !runtime.runtimeWebViewCleared()) {
+                // The profile must be scrubbed by one of the two paths before the gate can open:
+                // either before the first WebView existed (cold start) or by clearWebViewData()
+                // (online revocation). Otherwise a revoked session would keep its old storage.
                 call.reject("Restart required to clear the WebView profile", "WIPE_RESTART_REQUIRED");
                 return;
             }
@@ -109,7 +121,8 @@ public final class AppSecurityPlugin extends Plugin {
     }
 
     /**
-     * Physically erases the local business data (SQLite files, {@code uploads/}, {@code uploads-restore/}).
+     * Physically erases the local business data (SQLite files, {@code uploads/},
+     * {@code uploads-restore/}, {@code safety-backups/}).
      *
      * <p>Refuses to run unless {@code lockedPendingWipe} is already persisted: the durable gate must be
      * in place before any byte is deleted, so a failed wipe can never leave readable data behind an
@@ -128,9 +141,75 @@ public final class AppSecurityPlugin extends Plugin {
         result.put("databaseRemoved", report.databaseRemoved());
         result.put("uploadsRemoved", report.uploadsRemoved());
         result.put("restoreRemoved", report.restoreRemoved());
+        result.put("safetyBackupsRemoved", report.safetyBackupsRemoved());
         JSArray failed = new JSArray();
         for (String name : report.failed()) failed.put(name);
         result.put("failed", failed);
+        call.resolve(result);
+    }
+
+    /** @return {@code {notice: {...} | null}} straight from the private security directory */
+    @PluginMethod
+    public void getMemberRemovedNotice(PluginCall call) {
+        call.resolve(toJsNotice(SecurityRuntime.get(getContext()).noticeStore().read()));
+    }
+
+    /** Reads and deletes the notice so the UI sees it exactly once. */
+    @PluginMethod
+    public void consumeMemberRemovedNotice(PluginCall call) {
+        call.resolve(toJsNotice(SecurityRuntime.get(getContext()).noticeStore().consume()));
+    }
+
+    /**
+     * Persists the one-shot notice. Only allowed while {@code lockedPendingWipe} is durable, i.e. the
+     * JS side has already committed to a revocation wipe; a normal session can never fabricate one.
+     */
+    @PluginMethod
+    public void setMemberRemovedNotice(PluginCall call) {
+        SecurityRuntime runtime = SecurityRuntime.get(getContext());
+        if (!runtime.gateStore().get().lockedPendingWipe()) {
+            call.reject("The device is not pending wipe", "NOT_LOCKED");
+            return;
+        }
+        String wipedAt = call.getString("wipedAt");
+        if (wipedAt == null || wipedAt.trim().isEmpty() || wipedAt.length() > 64) {
+            call.reject("wipedAt is required", "INVALID_INPUT");
+            return;
+        }
+        String householdId = optionalString(call, "householdId");
+        String memberId = optionalString(call, "memberId");
+        if (householdId == INVALID || memberId == INVALID) {
+            call.reject("Identity fields must be strings or null", "INVALID_INPUT");
+            return;
+        }
+        try {
+            runtime.noticeStore().write(householdId, memberId, wipedAt);
+            call.resolve();
+        } catch (IOException ex) {
+            call.reject("Unable to store the removal notice", "NOTICE_WRITE_FAILED");
+        }
+    }
+
+    /**
+     * Clears the live WebView's own storage, cookies and cache on the main thread.
+     *
+     * <p>This is what lets an online revocation release the gate without a process restart. Only
+     * allowed while a wipe is pending, so the same method cannot be used to clear cache at will.</p>
+     */
+    @PluginMethod
+    public void clearWebViewData(PluginCall call) {
+        SecurityRuntime runtime = SecurityRuntime.get(getContext());
+        if (!runtime.gateStore().get().lockedPendingWipe()) {
+            call.reject("The device is not pending wipe", "NOT_LOCKED");
+            return;
+        }
+        android.webkit.WebView view = getBridge() == null ? null : getBridge().getWebView();
+        // Cold start already scrubbed the profile before the first WebView existed, so a fresh
+        // profile is empty by construction; the online path needs the live clear below.
+        boolean cleared = runtime.pendingWipeProfilePurged() || WebViewRuntimePurge.clear(view);
+        if (cleared) runtime.markRuntimeWebViewCleared(true);
+        JSObject result = new JSObject();
+        result.put("cleared", cleared);
         call.resolve(result);
     }
 
@@ -138,10 +217,37 @@ public final class AppSecurityPlugin extends Plugin {
         return SecurityRuntime.get(getContext()).gateService();
     }
 
+    private static final String INVALID = "\u0000invalid";
+
+    /** Reads an optional string field: absent/null -&gt; null, string -&gt; itself, else {@link #INVALID}. */
+    private static String optionalString(PluginCall call, String name) {
+        Object value = call.getData().opt(name);
+        if (value == null || value == JSONObject.NULL) return null;
+        if (value instanceof String) {
+            String text = (String) value;
+            return text.length() > 200 ? INVALID : text;
+        }
+        return INVALID;
+    }
+
     /** A field must be absent, JSON null, or a real boolean; anything else is a contract violation. */
     private static boolean hasBooleanOrAbsent(PluginCall call, String name) {
         Object value = call.getData().opt(name);
         return value == null || value instanceof Boolean;
+    }
+
+    private static JSObject toJsNotice(Map<String, Object> notice) {
+        JSObject result = new JSObject();
+        if (notice == null) {
+            result.put("notice", JSONObject.NULL);
+            return result;
+        }
+        JSObject payload = new JSObject();
+        for (Map.Entry<String, Object> entry : notice.entrySet()) {
+            payload.put(entry.getKey(), entry.getValue() == null ? JSONObject.NULL : entry.getValue());
+        }
+        result.put("notice", payload);
+        return result;
     }
 
     private static JSObject toJs(GateState state) {

@@ -51,6 +51,7 @@ public class LocalDataPurgeTest {
         write(new File(filesDir, "uploads/thumb/a.webp"), "thumb");
         write(new File(filesDir, "uploads-restore/staged/b.webp"), "staged");
         write(new File(filesDir, "uploads-restore/marker"), "1");
+        write(new File(filesDir, "safety-backups/dafan-epoch-1-to-2.zip"), "zip");
         // Unrelated private data must survive: the purge is not a factory reset.
         write(new File(filesDir, "unrelated.txt"), "keep");
         write(new File(databaseDir, "another.db"), "keep");
@@ -67,12 +68,26 @@ public class LocalDataPurgeTest {
         assertTrue(report.databaseRemoved());
         assertTrue(report.uploadsRemoved());
         assertTrue(report.restoreRemoved());
+        assertTrue(report.safetyBackupsRemoved());
         assertTrue(report.failed().isEmpty());
         assertFalse(new File(databaseDir, "dafanSQLite.db").exists());
         assertFalse(new File(databaseDir, "dafanSQLite.db-wal").exists());
         assertFalse(new File(databaseDir, "dafanSQLite.db-shm").exists());
         assertFalse(new File(filesDir, "uploads").exists());
         assertFalse(new File(filesDir, "uploads-restore").exists());
+        assertFalse(new File(filesDir, "safety-backups").exists());
+    }
+
+    @Test
+    public void keepsTheDurableRemovalNoticeOutsideThePurgeTargets() throws IOException {
+        createFullLayout();
+        File notice = new File(filesDir.getParentFile(), "no_backup/security/member-removed-notice.json");
+        write(notice, "{\"version\":1,\"wipedAt\":\"2026-03-04T05:06:07.000Z\"}");
+
+        purge.run();
+
+        // The notice lives in no_backup/, not FilesDir: a complete purge must not erase it.
+        assertTrue(notice.isFile());
     }
 
     @Test
@@ -135,9 +150,10 @@ public class LocalDataPurgeTest {
     @Test
     public void completenessRequiresEveryTargetToBeAbsent() {
         // The report is the only signal the JS side trusts before unlocking the gate.
-        assertTrue(new LocalDataPurge.PurgeReport(true, true, true, java.util.Collections.emptyList()).complete());
-        assertFalse(new LocalDataPurge.PurgeReport(false, true, true, java.util.Arrays.asList("dafanSQLite.db")).complete());
-        assertFalse(new LocalDataPurge.PurgeReport(true, false, true, java.util.Arrays.asList("uploads")).complete());
-        assertFalse(new LocalDataPurge.PurgeReport(true, true, false, java.util.Arrays.asList("uploads-restore")).complete());
+        assertTrue(new LocalDataPurge.PurgeReport(true, true, true, true, java.util.Collections.emptyList()).complete());
+        assertFalse(new LocalDataPurge.PurgeReport(false, true, true, true, java.util.Arrays.asList("dafanSQLite.db")).complete());
+        assertFalse(new LocalDataPurge.PurgeReport(true, false, true, true, java.util.Arrays.asList("uploads")).complete());
+        assertFalse(new LocalDataPurge.PurgeReport(true, true, false, true, java.util.Arrays.asList("uploads-restore")).complete());
+        assertFalse(new LocalDataPurge.PurgeReport(true, true, true, false, java.util.Arrays.asList("safety-backups")).complete());
     }
 }

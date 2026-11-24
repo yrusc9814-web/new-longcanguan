@@ -27,6 +27,7 @@ import java.util.List;
  *     <li>{@code listFiles()} -&gt; {@code {paths: string[]}}</li>
  *     <li>{@code statFile({path})} -&gt; {@code {exists, size, sha256}}</li>
  *     <li>{@code deleteFiles({paths})} -&gt; {@code {deleted: string[]}}</li>
+ *     <li>{@code writeSafetyBackup({name, dataBase64})} -&gt; independent private backup tree</li>
  * </ul>
  *
  * <p>The directory is exactly {@link SecurityRuntime#uploadsDirectory()} so writes land in the
@@ -169,6 +170,46 @@ public final class UploadsFilesPlugin extends Plugin {
     @PluginMethod
     public void recoverRestore(PluginCall call) {
         restoreOperation(call, () -> restore().recover(call.getInt("restoreId", 0)));
+    }
+
+    /**
+     * Writes an epoch safety backup into {@code FilesDir/safety-backups/}.
+     *
+     * <p>Deliberately separate from {@link #writeFile}: the uploads tree is replaced wholesale by a
+     * database restore, which must not be able to delete or overwrite these backups. The name is
+     * validated by {@link com.dafan.xiaoguan.security.SafetyBackupStore}; no caller path is used.</p>
+     */
+    @PluginMethod
+    public void writeSafetyBackup(PluginCall call) {
+        SecurityRuntime runtime = SecurityRuntime.get(getContext());
+        if (runtime.gateStore().get().lockedPendingWipe()) {
+            // A revoked device must not write anything back to disk before the purge.
+            call.reject("The device is pending wipe", "MEMBER_REVOKED");
+            return;
+        }
+        String name = call.getString("name");
+        String base64 = call.getString("dataBase64");
+        if (base64 == null) {
+            Object raw = call.getData().opt("data");
+            if (raw instanceof String) base64 = (String) raw;
+        }
+        if (name == null || base64 == null) {
+            call.reject("name and data are required", "INVALID_INPUT");
+            return;
+        }
+        byte[] data;
+        try {
+            data = Base64.decode(base64, Base64.NO_WRAP);
+        } catch (IllegalArgumentException ex) {
+            call.reject("data must be base64", "INVALID_INPUT");
+            return;
+        }
+        try {
+            runtime.safetyBackupStore().write(name, data);
+            call.resolve();
+        } catch (IOException ex) {
+            call.reject("Unable to write the safety backup", "BACKUP_WRITE_FAILED");
+        }
     }
 
     @FunctionalInterface
