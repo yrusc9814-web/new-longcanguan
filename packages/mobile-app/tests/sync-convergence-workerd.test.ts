@@ -288,9 +288,9 @@ describe('AC1 端侧收敛联调', () => {
         )
         .sort();
     const itemIds = async (database: DatabaseHandle) =>
-      (
-        await database.query<{ id: string }>('SELECT "id" FROM "ShoppingListItem"')
-      ).map(({ id }) => id);
+      (await database.query<{ id: string }>('SELECT "id" FROM "ShoppingListItem"')).map(
+        ({ id }) => id,
+      );
 
     // 停机后手动驱动，避免后台 WS 广播插入额外推送，保证每次显式同步恰好一次 push。
     owner.engine.stop();
@@ -335,7 +335,10 @@ describe('AC1 端侧收敛联调', () => {
     // 第 2 轮：馆主物理删除豆腐并推送；成员尚未拉到删除，继续离线新增，
     // 其载荷仍完整携带已删条目（item 与 baseItems 都含豆腐）。
     const ownerView = await owner.local<{ version: number }>(shopping);
-    await owner.local(`/shopping-list-items/${created['豆腐']}?version=${ownerView.version}`, 'DELETE');
+    await owner.local(
+      `/shopping-list-items/${created['豆腐']}?version=${ownerView.version}`,
+      'DELETE',
+    );
     await owner.engine.syncOnce();
     expect(pushFailures(owner)).toEqual([]);
 
