@@ -367,7 +367,11 @@ export function acceptSnapshotPage(
   fingerprint: string,
 ): { result: SyncSnapshotUploadResult; changed: boolean; deletedObjectKeys: string[] } {
   const now = Date.now();
-  sql.exec('DELETE FROM sync_uploads WHERE expires_at <= ?', now);
+  // 保留本代际已完成的首次上传回执，供客户端断网后重放原分页。
+  sql.exec(
+    "DELETE FROM sync_uploads WHERE expires_at <= ? AND (action <> 'init' OR result_json IS NULL)",
+    now,
+  );
   const { uploadId, page, finalize } = upload;
   const session = sql
     .exec<UploadSession>(

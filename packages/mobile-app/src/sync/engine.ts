@@ -408,6 +408,10 @@ export class SyncEngine {
     this.socket?.stop();
     this.socket = null;
     this.connectionId = null;
+    if (this.retryTimer !== null) {
+      this.options.timers?.clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
     for (const cleanup of this.listenerCleanup.splice(0)) cleanup();
   }
 

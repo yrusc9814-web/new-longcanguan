@@ -45,7 +45,7 @@ describe('Capacitor 插件契约', () => {
     const tables = await database.query<{ c: number }>(
       "SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
     );
-    expect(tables[0]?.c).toBe(30);
+    expect(tables[0]?.c).toBe(31);
     expect(database.driverKind).toBe('capacitor-sqlite@7.0.3');
     await database.close();
     expect(plugin.calls.at(-1)?.method).toBe('closeConnection');

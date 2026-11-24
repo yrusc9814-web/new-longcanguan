@@ -283,7 +283,17 @@ describe('AC1 端侧收敛联调', () => {
       ingredientName: '成员买蛋',
     });
 
-    // 成员先拉（跳过本地未确认的清单聚合），再推送。
+    const first = await owner.local<{
+      version: number;
+      items: { id: string; ingredientName: string }[];
+    }>(shopping);
+    const ownerItem = first.items.find((item) => item.ingredientName === '馆主买肉')!;
+    await owner.local(`/shopping-list-items/${ownerItem.id}`, 'PUT', {
+      version: first.version,
+      completed: true,
+    });
+    await owner.engine.syncOnce();
+    // 馆主的两次改动已经上云；成员先跳过整个待推聚合，再连推两次本地操作。
     await member.engine.pullNow();
     await member.engine.syncOnce();
     expect(member.requests.filter(({ path }) => path === '/api/sync/push').length).toBeGreaterThan(

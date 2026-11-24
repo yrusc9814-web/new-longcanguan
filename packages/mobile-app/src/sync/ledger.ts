@@ -360,9 +360,41 @@ export async function applyRowChanges(
 ): Promise<void> {
   if (changes.length === 0) return;
   await tx.exec('PRAGMA defer_foreign_keys = ON');
+  const skippedPlans = new Set<string>();
+  for (const change of changes) {
+    if (
+      change.table !== 'MealPlan' ||
+      !change.row ||
+      change.row.deletedAt ||
+      typeof change.row.planDate !== 'string' ||
+      typeof change.row.mealType !== 'string'
+    )
+      continue;
+    const [blockingPlan] = await tx.query<{ id: string }>(
+      `SELECT plan."id" FROM "MealPlan" AS plan
+        JOIN "${SYNC_OUTBOX_TABLE}" AS pending ON pending."entityId" = plan."id"
+        WHERE plan."planDate" = ? AND plan."mealType" = ? AND plan."deletedAt" IS NULL
+          AND plan."id" <> ? AND pending."entity" = 'MealPlan' AND pending."baseVersion" IS NOT NULL
+        LIMIT 1`,
+      [change.row.planDate, change.row.mealType, change.id],
+    );
+    if (blockingPlan) skippedPlans.add(String(change.id));
+  }
   for (const change of changes) {
     const table = String(change.table);
     if (!SET_TABLES.has(table)) continue;
+    if (table === 'MealPlan' && skippedPlans.has(String(change.id))) continue;
+    if ((table === 'MealPlanItem' || table === 'MealPlanDiner') && skippedPlans.size) {
+      const parentId =
+        change.row?.mealPlanId ??
+        (
+          await tx.query<{ mealPlanId: string }>(
+            `SELECT "mealPlanId" FROM "${table}" WHERE "id" = ?`,
+            [change.id],
+          )
+        )[0]?.mealPlanId;
+      if (skippedPlans.has(String(parentId))) continue;
+    }
     const columns = await tableColumns(tx, cache, table);
     if (change.row === null) {
       await tx.run(`DELETE FROM "${table}" WHERE "id" = ?`, [normalizeValue(change.id)]);

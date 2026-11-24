@@ -156,7 +156,7 @@ function scheduleReloadAfterWipe(): void {
       if (!host.location?.reload) return;
       // 清退完成事件或本地请求可能已打开新库。原生连接跨文档存活，重载前必须先关闭。
       void closeDatabase()
-        .then(() => host.location?.reload())
+        .then(() => host.location?.reload?.())
         .catch(() => {
           // 连接关闭失败时保留当前文档，让它继续使用新库。
           wipeInProgress = false;

@@ -643,6 +643,7 @@ describe('购物清单长离线基线', () => {
         baseVersion: 3,
         payload: {
           ...latestPayload,
+          baseItems: latestPayload.items,
           version: 4,
           items: (latestPayload.items as Record<string, unknown>[]).filter(
             (entry) => entry.id !== eggId,

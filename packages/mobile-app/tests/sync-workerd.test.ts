@@ -61,7 +61,7 @@ async function makeDevice(name: string) {
     snapshotPageSize: 1,
     safetyBackupStore: {
       async write(backup) {
-        await files.writeFile({ path: `safety-backups/${backup.name}`, data: backup.bytes });
+        await files.writeSafetyBackup!({ name: backup.name, data: backup.bytes });
         backups.push(backup.bytes);
         return backup.name;
       },
@@ -612,8 +612,13 @@ describe('mobile SQLite and HouseholdHub on Miniflare', () => {
       .toBe(true);
     await expect.poll(async () => (await member.engine.status()).epoch, pollOptions).toBe(2);
     expect(member.backups).toHaveLength(1);
-    const pending = new TextDecoder().decode(unzipSync(member.backups[0]!)['sync/pending.json']);
-    expect(pending).toContain('旧代际离线土豆');
+    const backup = unzipSync(member.backups[0]!);
+    expect(new TextDecoder().decode(backup['sync/pending.json'])).toContain('旧代际离线土豆');
+    expect(backup[`uploads/${asset.storagePath}`]).toEqual(main);
+    expect(backup[`uploads/${asset.thumbnailPath}`]).toEqual(thumb);
+    expect((await member.engine.status()).latestSafetyBackup).toMatch(
+      /^dafan-epoch-1-to-2-.*\.zip$/,
+    );
     expect(await rows(member.database, 'ShoppingListItem')).toEqual(
       await rows(owner.database, 'ShoppingListItem'),
     );

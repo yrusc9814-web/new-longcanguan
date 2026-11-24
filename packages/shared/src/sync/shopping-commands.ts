@@ -145,4 +145,6 @@ export interface ShoppingListUpsertPayload {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly items: readonly ShoppingListItemFactPayload[];
+  /** 本次本地写入前的条目快照，供云端逐项合并。旧客户端可省略。 */
+  readonly baseItems?: readonly ShoppingListItemFactPayload[];
 }

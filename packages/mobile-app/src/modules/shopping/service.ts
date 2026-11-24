@@ -157,7 +157,7 @@ async function listUpsertPayload(
   tx: WriteTransaction,
   list: ShoppingListRow,
   baseItems?: readonly ShoppingListItemFactPayload[],
-): Promise<ShoppingListUpsertPayload & { baseItems?: readonly ShoppingListItemFactPayload[] }> {
+): Promise<ShoppingListUpsertPayload> {
   const items = await readItems(tx, list.id);
   return {
     id: list.id,

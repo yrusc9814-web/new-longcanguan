@@ -637,6 +637,98 @@ describe('engine：绑定与代际切换', () => {
     await database.close();
   });
 
+  it('图片下载失败不阻塞本批上传及业务推送', async () => {
+    const database = await db();
+    const files = createMemoryUploadsFiles();
+    const bytes = new Uint8Array([1, 8, 2]);
+    const sha256 = await sha256Hex(bytes);
+    await files.writeFile({ path: 'local.webp', data: bytes });
+    await database.withWriteTransaction((tx) =>
+      tx.enqueue({
+        opId: 'local-image',
+        entity: 'UploadAsset',
+        entityId: 'local-image',
+        kind: 'upsert',
+        baseVersion: null,
+        payload: { id: 'local-image', sha256, storagePath: 'local.webp' },
+      }),
+    );
+    const requests: string[] = [];
+    const { engine } = await boundEngine(
+      database,
+      async (url, init) => {
+        const path = new URL(url).pathname;
+        requests.push(`${init?.method} ${path}`);
+        if (path.startsWith('/api/sync/images/')) {
+          return init?.method === 'PUT' ? new Response(null, { status: 204 }) : json(404, {});
+        }
+        if (path === '/api/sync/push') {
+          return json(200, { acceptedOperationIds: ['local-image'], rejected: [] });
+        }
+        return json(200, { epoch: EPOCH, entries: [], nextSeq: 0, hasMore: false });
+      },
+      { files },
+    );
+    engine.images.enqueueDownload({
+      sha256: '0'.repeat(64),
+      storagePath: 'missing.webp',
+      thumbnailPath: null,
+    });
+    try {
+      await engine.syncOnce();
+      expect(requests).toEqual([
+        `PUT /api/sync/images/${sha256}`,
+        'POST /api/sync/push',
+        'GET /api/sync/pull',
+        `GET /api/sync/images/${'0'.repeat(64)}`,
+      ]);
+      expect(await engine.status()).toMatchObject({ phase: 'ok', pendingOperations: 0 });
+    } finally {
+      await database.close();
+    }
+  });
+
+  it('本地坏图保留发件箱并进入 error，不安排网络重试', async () => {
+    const database = await db();
+    const files = createMemoryUploadsFiles();
+    await files.writeFile({ path: 'corrupt.webp', data: new Uint8Array([3, 2, 1]) });
+    await database.withWriteTransaction((tx) =>
+      tx.enqueue({
+        opId: 'bad-image',
+        entity: 'UploadAsset',
+        entityId: 'bad-image',
+        kind: 'upsert',
+        baseVersion: null,
+        payload: { id: 'bad-image', sha256: '0'.repeat(64), storagePath: 'corrupt.webp' },
+      }),
+    );
+    const timers = noopTimers();
+    const requests: string[] = [];
+    const { engine } = await boundEngine(
+      database,
+      async (url) => {
+        const path = new URL(url).pathname;
+        requests.push(path);
+        return json(201, { ticket: 'fixture' });
+      },
+      { files, timers },
+    );
+    try {
+      engine.start();
+      await engine.wake();
+      expect(await engine.status()).toMatchObject({
+        phase: 'error',
+        pendingOperations: 1,
+        lastError: expect.stringContaining('哈希不一致'),
+      });
+      expect(requests).toEqual(['/api/sync/ws-ticket']);
+      expect(timers.delivered).toEqual([]);
+    } finally {
+      engine.stop();
+      await database.close();
+    }
+  });
+
   it('EPOCH_RESET：旧代际有待同步数据时先落安全备份，再切快照并清空发件箱', async () => {
     const database = await db();
     await seedOutboxRow(database, 'op-old');
