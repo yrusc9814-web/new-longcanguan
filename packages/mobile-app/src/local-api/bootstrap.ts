@@ -95,7 +95,7 @@ async function clearWebViewData(): Promise<boolean> {
 async function closeDatabase(): Promise<void> {
   // 先落闸：即使某个在途请求此刻才调 getDatabase()，也不会在删除后重新建库。
   wipeInProgress = true;
-  const handle = await pending?.catch(() => undefined);
+  const handle = await database?.catch(() => undefined);
   await handle?.close();
   database = undefined;
 }

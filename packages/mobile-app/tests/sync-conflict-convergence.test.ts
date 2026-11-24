@@ -591,7 +591,13 @@ describe('conflict：整链回滚与权威集合', () => {
                   {
                     table: 'Recipe',
                     id: 'r1',
-                    row: { id: 'r1', name: '云端名', version: 3, deletedAt: null },
+                    row: {
+                      id: 'r1',
+                      name: '云端名',
+                      version: 3,
+                      deletedAt: null,
+                      updatedAt: NOW.toISOString(),
+                    },
                   },
                 ],
               },
