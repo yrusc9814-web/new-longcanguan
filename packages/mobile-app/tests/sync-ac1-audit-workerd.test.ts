@@ -40,6 +40,7 @@ interface Device {
   readonly database: DatabaseHandle;
   readonly engine: ReturnType<typeof createSyncEngine>;
   readonly pushes: PushRecord[];
+  readonly actualSockets: WebSocket[];
   local<T>(path: string, method?: string, body?: unknown): Promise<T>;
   token(): Promise<string>;
   cleanup(): void;
@@ -59,6 +60,7 @@ async function makeDevice(name: string): Promise<Device> {
   const security = createMemoryAppSecurity();
   const files = createMemoryUploadsFiles();
   const pushes: PushRecord[] = [];
+  const actualSockets: WebSocket[] = [];
   const { port } = new URL((await runtime.mf.ready).href);
   const engine = createSyncEngine({
     getDatabase: async () => database,
@@ -87,6 +89,7 @@ async function makeDevice(name: string): Promise<Device> {
     socketFactory(cloudUrl) {
       const url = new URL(cloudUrl);
       const actual = new WebSocket(`ws://127.0.0.1:${port}${url.pathname}${url.search}`);
+      actualSockets.push(actual);
       const socket: SocketLike = {
         get readyState() {
           return actual.readyState;
@@ -130,7 +133,16 @@ async function makeDevice(name: string): Promise<Device> {
 
   await local('/settings');
   await local('/shopping-lists?status=ACTIVE');
-  return { name, database, engine, pushes, local, token, cleanup: target.cleanup };
+  return {
+    name,
+    database,
+    engine,
+    pushes,
+    actualSockets,
+    local,
+    token,
+    cleanup: target.cleanup,
+  };
 }
 
 async function rows(database: DatabaseHandle, table: string) {
@@ -173,12 +185,42 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  for (const device of [owner, member]) {
-    device?.engine.stop();
-    await device?.database.close();
-    device?.cleanup();
+  for (const device of [owner, member]) device?.engine.stop();
+  try {
+    await Promise.all(
+      [owner, member].flatMap(
+        (device) =>
+          device?.actualSockets.map(async (socket) => {
+            if (socket.readyState === WebSocket.CLOSED) return;
+            await new Promise<void>((resolve, reject) => {
+              const timeout = setTimeout(
+                () => reject(new Error('WebSocket did not close before dispose')),
+                10_000,
+              );
+              socket.addEventListener(
+                'close',
+                () => {
+                  clearTimeout(timeout);
+                  resolve();
+                },
+                { once: true },
+              );
+              try {
+                socket.close();
+              } catch {
+                // 关闭已终止的连接会抛错，忽略即可交给上面的超时兜底。
+              }
+            });
+          }) ?? [],
+      ),
+    );
+  } finally {
+    for (const device of [owner, member]) {
+      await device?.database.close();
+      device?.cleanup();
+    }
+    await runtime?.dispose();
   }
-  await runtime?.dispose();
 }, 60_000);
 
 describe('AC1③ 端云重放补充审计', () => {

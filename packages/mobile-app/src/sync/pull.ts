@@ -8,6 +8,7 @@
 import type { SyncPullPage, SyncRowChange } from '@dafan/shared/sync';
 
 import type { DatabaseClient, WriteTransaction } from '../db/database.js';
+import { SYNC_OUTBOX_TABLE } from '../db/schema.js';
 import { SyncHttpError } from './http.js';
 import type { SyncHttpClient } from './http.js';
 import {
@@ -18,7 +19,7 @@ import {
   writeSyncState,
   type ColumnCache,
 } from './ledger.js';
-import type { PushConflict } from './push.js';
+import type { AuthoritativeEntityRows, PushConflict } from './push.js';
 
 export interface PullResult {
   readonly applied: number;
@@ -185,13 +186,19 @@ export async function pullUntilIdle(options: PullOptions, maxPages = 20): Promis
   return { ...last, applied: total };
 }
 
-/** 冲突后强制对齐指定实体（不受本地未确认行保护）。 */
+/**
+ * 冲突后强制对齐指定实体。
+ *
+ * 只传 `forceKeys`，不动 `respectPending`：`pullFrom` 中 force 命中先于 pending 判断，
+ * 被冲突实体仍会被强制覆盖；若把 `respectPending` 设为 false，同一页里其它聚合的
+ * 本地未确认行也会被一起覆盖。
+ */
 export async function alignConflictedEntities(
   options: Omit<PullOptions, 'forceKeys' | 'respectPending'>,
   conflicts: readonly PushConflict[],
 ): Promise<PullResult> {
   const keys = [...new Set(conflicts.map((conflict) => `${conflict.entity}:${conflict.entityId}`))];
-  return pullUntilIdle({ ...options, forceKeys: keys, respectPending: false });
+  return pullUntilIdle({ ...options, forceKeys: keys });
 }
 
 /**
@@ -400,8 +407,14 @@ async function rollbackChainEffects(tx: WriteTransaction, ids: RollbackIds): Pro
 }
 
 /**
- * 用云端权威聚合行完整替换本地父子表：先删掉本地多出来的子行，
- * 再按行 upsert/删除，保证「回滚后本地聚合 == 服务端聚合」。
+ * 用云端权威聚合行替换本地数据。
+ *
+ * - `dependency` 单元只是被权威子行外键引用的目标行：逐行补插本地缺失行，
+ *   绝不剪枝子行、绝不覆盖已有行或本地未确认写入。
+ * - 普通单元按「回滚后本地聚合 == 服务端聚合」完整替换父子表。
+ *
+ * 先处理 `dependency` 单元：普通单元的整聚合替换要删除/写入引用这些目标的行，
+ * 目标行不在本地时 COMMIT 的外键检查会整体失败。
  */
 async function applyAuthoritative(
   tx: WriteTransaction,
@@ -409,6 +422,10 @@ async function applyAuthoritative(
   authoritative: PushConflict['authoritative'],
 ): Promise<void> {
   for (const entry of authoritative) {
+    if (entry.dependency) await applyDependencyRows(tx, cache, entry);
+  }
+  for (const entry of authoritative) {
+    if (entry.dependency) continue;
     const root = String(entry.entity);
     if (entry.rows.length === 0) {
       await deleteAggregateChildren(tx, root, entry.entityId);
@@ -429,6 +446,35 @@ async function applyAuthoritative(
       );
     }
     await applyRowChanges(tx, cache, entry.rows);
+  }
+}
+
+/**
+ * 只补齐本地缺失的外键目标行。
+ *
+ * 本地仍有该目标的未确认操作时整单元跳过：用户写入尚未推送，权威行不覆盖。
+ * 目标行的其它事实（子行、软删状态）留给随后的增量拉取。
+ */
+async function applyDependencyRows(
+  tx: WriteTransaction,
+  cache: ColumnCache,
+  entry: AuthoritativeEntityRows,
+): Promise<void> {
+  for (const change of entry.rows) {
+    if (change.row === null) continue;
+    const [pending] = await tx.query<{ id: string }>(
+      `SELECT "id" FROM "${SYNC_OUTBOX_TABLE}"
+        WHERE "entity" = ? AND "entityId" = ? AND "state" IN ('pending', 'inflight')
+        LIMIT 1`,
+      [String(change.table), String(change.id)],
+    );
+    if (pending) continue;
+    const [existing] = await tx.query<{ id: unknown }>(
+      `SELECT "id" FROM "${String(change.table)}" WHERE "id" = ?`,
+      [change.id as string | number],
+    );
+    if (existing) continue;
+    await applyRowChanges(tx, cache, [change]);
   }
 }
 

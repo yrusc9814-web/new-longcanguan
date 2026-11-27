@@ -36,6 +36,7 @@ async function makeDevice(name: string): Promise<{
   requests: { path: string; status: number }[];
   failures: string[];
   revocations: string[];
+  actualSockets: WebSocket[];
   local<T>(path: string, method?: string, body?: unknown): Promise<T>;
   token(): Promise<string>;
   bindMember(ownerToken: string): Promise<unknown>;
@@ -47,6 +48,7 @@ async function makeDevice(name: string): Promise<{
   const requests: { path: string; status: number }[] = [];
   const failures: string[] = [];
   const revocations: string[] = [];
+  const actualSockets: WebSocket[] = [];
   const { port } = new URL((await runtime.mf.ready).href);
   const fetchCloud = async (input: string, init?: RequestInit) => {
     const url = new URL(input);
@@ -71,6 +73,7 @@ async function makeDevice(name: string): Promise<{
     socketFactory(cloudUrl) {
       const url = new URL(cloudUrl);
       const actual = new WebSocket(`ws://127.0.0.1:${port}${url.pathname}${url.search}`);
+      actualSockets.push(actual);
       const socket: SocketLike = {
         get readyState() {
           return actual.readyState;
@@ -118,6 +121,7 @@ async function makeDevice(name: string): Promise<{
     requests,
     failures,
     revocations,
+    actualSockets,
     local,
     token,
     async bindMember(ownerToken: string) {
@@ -168,12 +172,39 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  for (const { database, engine } of devices) {
-    engine.stop();
-    await database.close();
+  for (const { engine } of devices) engine.stop();
+  try {
+    await Promise.all(
+      devices.flatMap(({ actualSockets }) =>
+        actualSockets.map(async (socket) => {
+          if (socket.readyState === WebSocket.CLOSED) return;
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(
+              () => reject(new Error('WebSocket did not close before dispose')),
+              10_000,
+            );
+            socket.addEventListener(
+              'close',
+              () => {
+                clearTimeout(timeout);
+                resolve();
+              },
+              { once: true },
+            );
+            try {
+              socket.close();
+            } catch {
+              // 关闭已终止的连接会抛错，忽略即可交给上面的超时兜底。
+            }
+          });
+        }),
+      ),
+    );
+  } finally {
+    for (const { database } of devices) await database.close();
+    await runtime?.dispose();
   }
-  await runtime?.dispose();
-});
+}, 30_000);
 
 describe('AC1 端侧收敛联调', () => {
   it('菜谱聚合（步骤/标签/餐次/角色）多次编辑往返推送零唯一约束报错且表内容一致', async () => {

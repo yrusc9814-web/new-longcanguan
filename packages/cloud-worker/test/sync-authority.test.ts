@@ -612,3 +612,157 @@ describe('软删级联与排餐内嵌 Diner', () => {
     }
   });
 });
+
+describe('权威集合外键闭包与同链副根', () => {
+  function insertParentRows(target: Ledger): void {
+    target.sql.exec(
+      `INSERT INTO "Recipe" ("id","name","version","deletedAt","createdAt","updatedAt")
+       VALUES ('recipe-peer','对端新菜谱',1,NULL,?,?)`,
+      TS,
+      TS,
+    );
+    target.sql.exec(
+      `INSERT INTO "Tag" ("id","name","type","deletedAt","createdAt","updatedAt")
+       VALUES ('tag-peer','家常','GENERAL',NULL,?,?)`,
+      TS,
+      TS,
+    );
+    target.sql.exec(
+      `INSERT INTO "Diner" ("id","name","active","version","createdAt","updatedAt")
+       VALUES ('diner-peer','对端食客',1,1,?,?)`,
+      TS,
+      TS,
+    );
+  }
+
+  it('胜出排餐子行引用的对端新 Recipe/Diner 以 dependency 单元补齐', () => {
+    const target = ledger();
+    try {
+      insertParentRows(target);
+      replayOperation(target.sql, {
+        id: 'op-a',
+        entity: 'MealPlan',
+        entityId: 'plan-a',
+        kind: 'upsert',
+        baseVersion: null,
+        payload: planPayload('plan-a', {
+          items: [
+            {
+              id: 'mpi-a',
+              mealPlanId: 'plan-a',
+              itemType: 'RECIPE',
+              mealRole: 'MAIN',
+              recipeId: 'recipe-peer',
+              storeId: null,
+              customName: null,
+              sortOrder: 0,
+              createdAt: TS,
+              updatedAt: TS,
+            },
+          ],
+          diners: [
+            {
+              id: 'diner-peer',
+              name: '对端食客',
+              avatarPath: null,
+              active: true,
+              likesText: null,
+              dislikesText: null,
+              tabooText: null,
+              allergyText: null,
+              portionNote: null,
+              notes: null,
+              version: 1,
+              createdAt: TS,
+              updatedAt: TS,
+            },
+          ],
+        }) as never,
+      });
+      const conflict = capture(() =>
+        replayOperation(target.sql, {
+          id: 'op-b',
+          entity: 'MealPlan',
+          entityId: 'plan-b',
+          kind: 'upsert',
+          baseVersion: null,
+          payload: planPayload('plan-b') as never,
+        }),
+      );
+      const rejection = authoritativeRejection(
+        target.sql,
+        conflict.operation as SyncOperation,
+        conflict.rejection,
+      );
+      const dependencies = (rejection.authoritative ?? []).filter((unit) => unit.dependency);
+      expect(dependencies.map((unit) => `${unit.entity}:${unit.entityId}`).sort()).toEqual([
+        'Diner:diner-peer',
+        'Recipe:recipe-peer',
+      ]);
+      for (const unit of dependencies) {
+        expect(unit.rows).toHaveLength(1);
+        expect(unit.rows[0]?.row).not.toBeNull();
+      }
+      // 普通单元不受影响：仍是「被拒空根 + 胜出完整聚合」。
+      const roots = (rejection.authoritative ?? []).filter((unit) => !unit.dependency);
+      expect(roots).toHaveLength(2);
+    } finally {
+      target.close();
+    }
+  });
+
+  it('同聚合根后继命令的副根（MealRecord）随权威集合回滚', () => {
+    const target = ledger();
+    try {
+      replayOperation(target.sql, {
+        id: 'op-plan',
+        entity: 'MealPlan',
+        entityId: 'plan-chain',
+        kind: 'upsert',
+        baseVersion: null,
+        payload: planPayload('plan-chain', { status: 'COMPLETED', version: 2 }) as never,
+      });
+      target.sql.exec(
+        `INSERT INTO "MealRecord"
+           ("id","recordDate","mealType","sourceType","status","sourceMealPlanId","version","deletedAt","createdAt","updatedAt")
+         VALUES ('record-chain','2026-11-21','DINNER','PLAN','DRAFT','plan-chain',3,NULL,?,?)`,
+        TS,
+        TS,
+      );
+      const operation: SyncOperation = {
+        id: 'op-chain-1',
+        entity: 'MealPlan',
+        entityId: 'plan-chain',
+        kind: 'upsert',
+        baseVersion: 1,
+        payload: planPayload('plan-chain') as never,
+      };
+      const successor: SyncOperation = {
+        id: 'op-chain-2',
+        entity: 'MealPlan',
+        entityId: 'plan-chain',
+        kind: 'command',
+        commandType: 'PLAN_COMPLETE',
+        baseVersion: 2,
+        payload: { record: { id: 'record-chain' }, recordRevived: true },
+        payloadHash: 'a'.repeat(64),
+      };
+      const rejection = authoritativeRejection(
+        target.sql,
+        operation,
+        { operationId: operation.id, code: 'VERSION_CONFLICT', serverVersion: 2 },
+        [successor],
+      );
+      const record = (rejection.authoritative ?? []).find(
+        (unit) =>
+          !unit.dependency && unit.entity === 'MealRecord' && unit.entityId === 'record-chain',
+      );
+      expect(record?.rows.map((change) => `${change.table}:${String(change.id)}`)).toEqual([
+        'MealRecord:record-chain',
+      ]);
+      expect((record?.rows[0]?.row as Record<string, unknown>).deletedAt).toBeNull();
+    } finally {
+      target.close();
+    }
+  });
+});

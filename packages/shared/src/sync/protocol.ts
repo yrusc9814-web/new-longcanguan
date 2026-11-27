@@ -78,6 +78,12 @@ export interface SyncAuthoritativeAggregate {
   readonly entityId: string;
   /** Full parent and child rows. Empty if the server has no matching aggregate. */
   readonly rows: readonly SyncRowChange[];
+  /**
+   * `true` 表示该单元只是被权威子行外键引用的目标行（如排餐条目引用的对端新菜谱）。
+   * 端侧只补齐本地缺失行，不删除本地子行、不替换已有聚合；默认 `false` 表示
+   * 完整替换该聚合的父子表。
+   */
+  readonly dependency?: boolean;
 }
 
 export interface SyncAcknowledgement {

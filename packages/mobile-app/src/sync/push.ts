@@ -37,6 +37,11 @@ export interface AuthoritativeEntityRows {
   readonly entity: SyncEntityName;
   readonly entityId: string;
   readonly rows: readonly SyncRowChange[];
+  /**
+   * `true` 表示该单元只是被权威子行外键引用的目标行：端侧只补插本地缺失行，
+   * 不得删除本地子行或覆盖已有/待推送的聚合。默认 `false` 表示完整替换。
+   */
+  readonly dependency: boolean;
 }
 
 export interface PushConflict {
@@ -59,13 +64,19 @@ function readAuthoritative(raw: unknown): AuthoritativeEntityRows[] {
   const result: AuthoritativeEntityRows[] = [];
   for (const entry of raw) {
     if (!entry || typeof entry !== 'object') continue;
-    const value = entry as { entity?: unknown; entityId?: unknown; rows?: unknown };
+    const value = entry as {
+      entity?: unknown;
+      entityId?: unknown;
+      rows?: unknown;
+      dependency?: unknown;
+    };
     if (typeof value.entity !== 'string' || typeof value.entityId !== 'string') continue;
     if (!Array.isArray(value.rows)) continue;
     result.push({
       entity: value.entity as SyncEntityName,
       entityId: value.entityId,
       rows: value.rows as SyncRowChange[],
+      dependency: value.dependency === true,
     });
   }
   return result;

@@ -497,6 +497,7 @@ describe('conflict：整链回滚与权威集合', () => {
         {
           entity: 'ShoppingList',
           entityId: 'list-1',
+          dependency: false,
           rows: [
             {
               table: 'ShoppingList',

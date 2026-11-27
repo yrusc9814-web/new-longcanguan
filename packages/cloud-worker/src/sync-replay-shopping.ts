@@ -2,6 +2,7 @@ import type { SyncEntityName, SyncOperation, SyncPayload } from '@dafan/shared/s
 
 import {
   ChangeCollector,
+  clearTombstone,
   deleteRow,
   insertRow,
   readRow,
@@ -32,6 +33,7 @@ function replaceListItems(
   listVersion: number,
   clientBaseVersion: number | null,
   changes: ChangeCollector,
+  options: { readonly trustItems?: boolean } = {},
 ): void {
   const keep = new Set(items.map((item) => String(item.id)));
   for (const existing of shoppingItems(sql, listId)) {
@@ -46,9 +48,13 @@ function replaceListItems(
     const itemId = String(item.id);
     // 墓碑版本 = 该行被删除时的清单版本。客户端基线早于它，说明客户端没看到删除，
     // 该条目只能视为过期事实；基线不早于它，才允许用户重新添加同 ID 条目。
-    const tombstone = readTombstone(sql, 'ShoppingListItem', itemId);
-    if (tombstone !== null && (clientBaseVersion === null || clientBaseVersion < tombstone)) {
-      continue;
+    // 三方合并路径已按显式 `baseItems` 完成同一判定（`trustItems`），不再重复按
+    // 分叉的本地版本号比较，避免长离线多步操作把旧条目当成「已见删除后再添加」。
+    if (!options.trustItems) {
+      const tombstone = readTombstone(sql, 'ShoppingListItem', itemId);
+      if (tombstone !== null && (clientBaseVersion === null || clientBaseVersion < tombstone)) {
+        continue;
+      }
     }
     const values = resolveColumns(REPLAY_TABLES.ShoppingListItem, {
       ...item,
@@ -62,6 +68,8 @@ function replaceListItems(
     } else {
       insertRow(sql, 'ShoppingListItem', values);
     }
+    // 条目重新成为云端事实：旧墓碑不得再误伤后续正常编辑。
+    clearTombstone(sql, 'ShoppingListItem', itemId);
     changes.capture('ShoppingListItem', itemId);
   }
 }
@@ -165,6 +173,9 @@ function mergeShoppingList(
       continue;
     }
     if (!server) {
+      // 客户端基线里已有且本次未改动：服务端已经删掉它（物理删除或入库移除），
+      // 本条只是客户端没看到删除的过期事实，严禁推回。
+      if (base && sameRow(base, client)) continue;
       finalItems.push(client);
       continue;
     }
@@ -185,11 +196,16 @@ function mergeShoppingList(
     finalItems.push(mergeFields(client, base, server));
   }
 
-  // 墓碑优先于任何载荷内容：只有客户端基线版本不早于删除版本，才允许条目重新出现。
-  // 基线落后（或未带基线）说明客户端没见过这次删除，属于复活已删条目。
+  // 墓碑优先于任何载荷内容。第一优先级是客户端本次操作前的真实基线快照：
+  // 基线里已有该条目说明删除发生在客户端视野之后，本地载荷只是过期事实。
+  // 端侧离线连续操作会把本地 `baseVersion` 推到墓碑版本之上，因此它不能单独
+  // 当作「已见过服务端删除」的证据；只有基线里没有该条目时，版本比较才作数。
   const survivors = finalItems.filter((item) => {
-    const tombstone = readTombstone(sql, 'ShoppingListItem', String(item.id));
-    return tombstone === null || baseVersion >= tombstone;
+    const id = String(item.id);
+    const tombstone = readTombstone(sql, 'ShoppingListItem', id);
+    if (tombstone === null) return true;
+    if (baseItems.has(id)) return false;
+    return baseVersion >= tombstone;
   });
 
   const nextVersion = rowVersion(serverList, 'ShoppingList') + 1;
@@ -207,7 +223,9 @@ function mergeShoppingList(
     version: nextVersion,
     updatedAt,
   });
-  replaceListItems(sql, listId, survivors, nextVersion, baseVersion, changes);
+  replaceListItems(sql, listId, survivors, nextVersion, baseVersion, changes, {
+    trustItems: true,
+  });
   changes.capture('ShoppingList', listId);
   rememberBaseline(sql, 'ShoppingList', readRow(sql, 'ShoppingList', listId));
   return { newVersion: nextVersion, changes: changes.list() };

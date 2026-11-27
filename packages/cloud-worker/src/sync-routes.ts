@@ -209,7 +209,7 @@ function push(sql: SqlStorage, epoch: number, memberId: string, body: PushBody) 
   const acknowledgements: SyncAcknowledgement[] = [];
   let seq = currentSeq(sql, epoch);
   const previousSeq = seq;
-  for (const { operation, fingerprint } of body.prepared) {
+  for (const [index, { operation, fingerprint }] of body.prepared.entries()) {
     const previous = sql
       .exec<{ member_id: string; fingerprint: string; ack_seq: number; new_version: number }>(
         'SELECT member_id, fingerprint, ack_seq, new_version FROM processed_ops WHERE epoch = ? AND client_id = ? AND op_id = ?',
@@ -237,7 +237,24 @@ function push(sql: SqlStorage, epoch: number, memberId: string, body: PushBody) 
       });
       continue;
     }
-    const { changes, newVersion } = replayOperation(sql, operation);
+    let replayed: ReturnType<typeof replayOperation>;
+    try {
+      replayed = replayOperation(sql, operation);
+    } catch (error) {
+      // 与端侧 `dropOperationChain` 同口径：同聚合根的后继操作会随被拒操作整链丢弃，
+      // 拒绝响应必须把链上每个操作触及的副根一并交回，端侧才能完整回滚。
+      if (error instanceof ReplayConflict && error.chain === undefined) {
+        error.chain = body.prepared
+          .slice(index + 1)
+          .map((entry) => entry.operation)
+          .filter(
+            (successor) =>
+              successor.entity === operation.entity && successor.entityId === operation.entityId,
+          );
+      }
+      throw error;
+    }
+    const { changes, newVersion } = replayed;
     writeJournal(
       sql,
       epoch,
@@ -404,7 +421,7 @@ export async function serveSync(
       // 批事务已回滚：此刻读到的就是「本条操作从未发生」的权威状态。
       const rejection =
         error.operation !== undefined
-          ? authoritativeRejection(sql, error.operation, error.rejection)
+          ? authoritativeRejection(sql, error.operation, error.rejection, error.chain ?? [])
           : error.rejection;
       return Response.json(
         {

@@ -140,6 +140,12 @@ function writeStorage(key: string, value: string): void {
   }
 }
 
+/** 图片重试定时器缺省实现；测试注入 `noop timers` 时不会真跑。 */
+const defaultTimers: Timers = {
+  setTimeout: (callback, ms) => globalThis.setTimeout(callback, ms),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
 export class SyncEngine {
   private readonly events: SyncEventSink;
   readonly http: SyncHttpClient;
@@ -170,6 +176,7 @@ export class SyncEngine {
       createImageSyncQueue({
         http: this.http,
         files,
+        now: () => (this.options.now?.() ?? new Date()).getTime(),
         onError: (error) => this.log(error),
       });
   }
@@ -412,6 +419,7 @@ export class SyncEngine {
       this.options.timers?.clearTimeout(this.retryTimer);
       this.retryTimer = null;
     }
+    this.clearImageRetryTimer();
     for (const cleanup of this.listenerCleanup.splice(0)) cleanup();
   }
 
@@ -490,7 +498,7 @@ export class SyncEngine {
       },
       50,
     );
-    await this.drainImageDownloads();
+    await this.drainImageDownloads(database);
     this.lastError = null;
     this.lastSyncedAt = (this.options.now?.() ?? new Date()).toISOString();
     await this.emitState('ok');
@@ -688,6 +696,7 @@ export class SyncEngine {
   }
 
   private retryTimer: unknown = null;
+  private imageRetryTimer: unknown = null;
 
   private scheduleRetry(delayMs: number): void {
     if (this.stopped) return;
@@ -777,7 +786,7 @@ export class SyncEngine {
       epoch: context.epoch,
       onApplied: (changes) => this.queueImageDownloads(changes),
     });
-    await this.drainImageDownloads();
+    await this.drainImageDownloads(database);
   }
 
   // ---------------------------------------------------------------- 图片
@@ -822,8 +831,18 @@ export class SyncEngine {
     void this.drainImageDownloads().catch((error) => this.handleSyncError(error));
   }
 
-  private async drainImageDownloads(): Promise<void> {
-    do {
+  /**
+   * 逐批处理到期的图片下载（每批单任务最多尝试一次），批次之间不重复处理退避中的任务。
+   * 仍有延迟任务时只安排一个重试定时器，由 `nextRetryDelay()` 决定等待时间。
+   */
+  private async drainImageDownloads(database?: DatabaseClient): Promise<void> {
+    if (database) await this.enqueueLedgerImages(database);
+    // 只处理到期任务；每批最多 batchSize，到期数下降即继续，避免批次截断遗漏。
+    let previousDue = Number.POSITIVE_INFINITY;
+    for (;;) {
+      const due = this.images.due;
+      if (due === 0 || due >= previousDue) break;
+      previousDue = due;
       const result = await this.images.drain();
       if (
         result.error instanceof EpochMismatchError ||
@@ -831,7 +850,35 @@ export class SyncEngine {
       ) {
         throw result.error;
       }
-    } while (this.images.pending > 0);
+    }
+    this.scheduleImageRetry();
+  }
+
+  /** 同一时刻只保留一个图片重试定时器；停机时由 `stop()` 清理。 */
+  private scheduleImageRetry(): void {
+    if (this.stopped) return;
+    const delay = this.images.nextRetryDelay();
+    if (delay === null) {
+      this.clearImageRetryTimer();
+      return;
+    }
+    if (this.imageRetryTimer !== null) return;
+    const timers = this.options.timers ?? defaultTimers;
+    this.imageRetryTimer = timers.setTimeout(
+      () => {
+        this.imageRetryTimer = null;
+        if (this.stopped) return;
+        this.startImageDownloads();
+      },
+      Math.max(0, delay),
+    );
+  }
+
+  private clearImageRetryTimer(): void {
+    if (this.imageRetryTimer === null) return;
+    const timers = this.options.timers ?? defaultTimers;
+    timers.clearTimeout(this.imageRetryTimer);
+    this.imageRetryTimer = null;
   }
 
   private async enqueueLedgerImages(database: DatabaseClient): Promise<void> {

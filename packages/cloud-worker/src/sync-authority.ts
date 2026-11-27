@@ -7,7 +7,7 @@ import type {
 } from '@dafan/shared/sync';
 
 import { ENTITY_CHILDREN } from './sync-replay-tables';
-import { readRow, rows, type RawRow } from './sync-replay-support';
+import { FOREIGN_KEYS, readRow, rows, type RawRow } from './sync-replay-support';
 
 /**
  * 冲突拒绝时随响应下发的权威聚合行。
@@ -20,7 +20,12 @@ import { readRow, rows, type RawRow } from './sync-replay-support';
  * - 冲突 `winner` 的根单独成单元；
  * - 关联实体（`PLAN_COMPLETE` 自动产生的 `MealRecord`、`SHOPPING_CHECKIN` 入库的
  *   `Ingredient` 等）各成单元；
- * - 每个单元携带完整父子行，含软删行（`row` 为整行，不做裁剪）。
+ * - 同批被连带丢弃的后继操作（`chain`）触及的根与副根同样成单元，避免只回滚
+ *   `Op1` 而把 `Op2..` 造成的本地脏状态留在端侧；
+ * - 每个单元携带完整父子行，含软删行（`row` 为整行，不做裁剪）；
+ * - 权威子行引用的其它聚合根（对端新建的 Recipe/Tag/Diner/Ingredient/...）以
+ *   `dependency` 单元补齐。端侧尚未 pull 时这些外键目标在本地不存在，若不下发，
+ *   收敛事务会在 COMMIT 时触发 `SQLITE_CONSTRAINT_FOREIGNKEY`。
  */
 
 interface Root {
@@ -63,6 +68,9 @@ function payloadRoots(operation: SyncOperation): Root[] {
     case 'RECORD_DELETE':
       push('MealPlan', idOf(objectOf(payload.revertedPlan)?.id));
       break;
+    case 'RECIPE_COOK_CHECKIN':
+      push('MealRecord', idOf(objectOf(payload.record)?.id));
+      break;
     case 'SHOPPING_CHECKIN':
       for (const fact of Array.isArray(payload.inventory) ? payload.inventory : []) {
         push('Ingredient', idOf(objectOf(fact)?.ingredientId));
@@ -92,6 +100,53 @@ function collect(sql: SqlStorage, root: Root): SyncAuthoritativeAggregate | null
   return { entity: root.entity, entityId: root.id, rows: changes };
 }
 
+/**
+ * 外键闭包：为所有已下发行中被引用、但尚未包含的目标行追加 `dependency` 单元。
+ *
+ * 只补父行、不展开目标的子行：端侧只需要外键目标存在即可提交，随后增量拉取会把
+ * 目标聚合的其余事实补齐。目标行本身若也引用别行，递归补齐。
+ */
+function collectDependencies(
+  sql: SqlStorage,
+  aggregates: readonly SyncAuthoritativeAggregate[],
+): SyncAuthoritativeAggregate[] {
+  const known = new Set<string>();
+  const queue: { table: SyncEntityName; row: RawRow }[] = [];
+  for (const unit of aggregates) {
+    for (const change of unit.rows) {
+      known.add(`${change.table}\u0000${String(change.id)}`);
+      if (change.row) queue.push({ table: change.table, row: change.row as RawRow });
+    }
+  }
+
+  const dependencies: SyncAuthoritativeAggregate[] = [];
+  while (queue.length > 0) {
+    const { table, row } = queue.shift()!;
+    for (const [column, target] of FOREIGN_KEYS[table] ?? []) {
+      const value = row[column];
+      if (value === undefined || value === null) continue;
+      if (typeof value !== 'string' && typeof value !== 'number') continue;
+      const key = `${target}\u0000${String(value)}`;
+      if (known.has(key)) continue;
+      const parent = readRow(sql, target, value);
+      // 云端账本自身受外键约束，正常不会出现悬空引用；真出现时不让拒绝响应失败，
+      // 端侧仍有后续增量拉取兜底。
+      if (!parent) continue;
+      const id = idOf(parent.id);
+      if (!id) continue;
+      known.add(key);
+      queue.push({ table: target, row: parent });
+      dependencies.push({
+        entity: target,
+        entityId: id,
+        rows: [{ table: target, id: parent.id as string | number, row: parent as never }],
+        dependency: true,
+      });
+    }
+  }
+  return dependencies;
+}
+
 /** 自然键（`Tag(name,type)`）在云端已有同键行时，把既有行也算作被拒根。 */
 function naturalKeyRoot(sql: SqlStorage, operation: SyncOperation): Root | null {
   if (operation.kind !== 'upsert' || operation.entity !== 'Tag') return null;
@@ -112,8 +167,18 @@ export function authoritativeRejection(
   sql: SqlStorage,
   operation: SyncOperation,
   rejection: SyncRejection,
+  chain: readonly SyncOperation[] = [],
 ): SyncRejection {
-  const roots: Root[] = [{ entity: operation.entity, id: operation.entityId }];
+  const roots: Root[] = [
+    { entity: operation.entity, id: operation.entityId },
+    ...payloadRoots(operation),
+  ];
+  // 整条被丢操作链：同聚合根的后续命令/写入同样从未在云端发生，
+  // 它们改过的副根（记录、食材、清单条目…）必须随权威集合一起回滚。
+  for (const successor of chain) {
+    roots.push({ entity: successor.entity, id: successor.entityId });
+    roots.push(...payloadRoots(successor));
+  }
 
   const winner = objectOf(rejection.winner);
   if (winner) {
@@ -124,7 +189,6 @@ export function authoritativeRejection(
     const root = asRoot('Ingredient', rejection.ingredientId);
     if (root) roots.push(root);
   }
-  roots.push(...payloadRoots(operation));
   const natural = naturalKeyRoot(sql, operation);
   if (natural) roots.push(natural);
 
@@ -137,5 +201,8 @@ export function authoritativeRejection(
     const aggregate = collect(sql, root);
     if (aggregate) aggregates.push(aggregate);
   }
-  return { ...rejection, authoritative: aggregates };
+  return {
+    ...rejection,
+    authoritative: [...aggregates, ...collectDependencies(sql, aggregates)],
+  };
 }

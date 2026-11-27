@@ -34,6 +34,11 @@ export class ReplayConflict extends Error {
   readonly rejection: SyncRejection;
   /** 被拒绝的原操作；运输层在批事务回滚后据此读取权威聚合行。 */
   readonly operation?: SyncOperation;
+  /**
+   * 同批中被连带丢弃的同聚合根后继操作（`[Op1, Op2, ...]` 的 `Op2..`）。
+   * 运输层用它们补齐 `Op2..` 触及的跨聚合副根的权威状态。
+   */
+  chain?: readonly SyncOperation[];
 
   constructor(rejection: SyncRejection, message?: string, operation?: SyncOperation) {
     super(message ?? rejection.code);
@@ -182,7 +187,7 @@ export function arrayPayload(value: unknown): RawRow[] {
   return Array.isArray(value) ? (value as RawRow[]) : [];
 }
 
-const FOREIGN_KEYS: Partial<
+export const FOREIGN_KEYS: Partial<
   Record<SyncEntityName, ReadonlyArray<readonly [string, SyncEntityName]>>
 > = {
   InventoryBatch: [['ingredientId', 'Ingredient']],
@@ -432,6 +437,22 @@ export function rememberTombstone(
     rowId,
     TOMBSTONE_VERSION,
     now - TOMBSTONE_RETENTION_MS,
+  );
+}
+
+/**
+ * 条目被合法重新写入服务端后清除旧墓碑。
+ *
+ * 墓碑只用于挡住「没看到删除却把旧行推回来」的过期事实；一旦该行重新成为云端事实，
+ * 后续正常编辑不得再被历史墓碑过滤。
+ */
+export function clearTombstone(sql: SqlStorage, table: SyncEntityName, rowId: string): void {
+  sql.exec(
+    `DELETE FROM "${HISTORY_TABLE}"
+      WHERE "table_name" = ? AND "row_id" = ? AND "version" = ?`,
+    table,
+    rowId,
+    TOMBSTONE_VERSION,
   );
 }
 

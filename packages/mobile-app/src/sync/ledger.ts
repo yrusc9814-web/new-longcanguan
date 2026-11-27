@@ -240,13 +240,13 @@ export async function tableColumns(
 /**
  * 复合自然唯一键：云端主键与本地随机主键不同但业务键相同时，必须先剪掉本地旧行，
  * 否则 `ON CONFLICT ("id")` 之外还会撞上这些唯一索引（见 shared 的 schema 索引）。
+ * 只登记 shared DDL 中真实存在的唯一索引：`RecipeTool` 仅有普通索引，登记会误删同菜谱多工具行。
  */
 const NATURAL_KEYS: Readonly<Record<string, readonly (readonly string[])[]>> = {
   RecipeStep: [['recipeId', 'stepNo']],
   RecipeMealType: [['recipeId', 'mealType']],
   RecipeMealRole: [['recipeId', 'mealRole']],
   RecipeTag: [['recipeId', 'tagId']],
-  RecipeTool: [['recipeId', 'toolId']],
   StoreMealType: [['storeId', 'mealType']],
   MealPlanDiner: [['mealPlanId', 'dinerId']],
   MealRecordDiner: [['mealRecordId', 'dinerId']],

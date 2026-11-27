@@ -44,6 +44,7 @@ const UNAUTHORIZED = { code: 'UNAUTHORIZED', status: 401 } as const;
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 const WS_TICKET_TTL_MS = 30_000;
 const MAX_AUTH_BODY_BYTES = 16_384;
+const R2_DELETE_BATCH_SIZE = 1000;
 const HUB_METHODS = ['GET', 'POST', 'PUT', 'DELETE'];
 const NO_STORE = { 'cache-control': 'no-store' };
 
@@ -102,7 +103,11 @@ export class HouseholdHub extends DurableObject<Env> {
         {
           deleteObjects: async (keys) => {
             if (!keys.length) return;
-            await this.env.PRIVATE_BUCKET.delete([...keys]);
+            const list = [...keys];
+            // R2 单次 delete 最多 1000 个 key，超出必须分批串行。
+            for (let index = 0; index < list.length; index += R2_DELETE_BATCH_SIZE) {
+              await this.env.PRIVATE_BUCKET.delete(list.slice(index, index + R2_DELETE_BATCH_SIZE));
+            }
           },
         },
       );

@@ -10,6 +10,12 @@
  *
  * 去重语义：同一 (sha256, variant) 在队列里最多一份；已存在于本地且哈希正确时
  * 直接跳过，因此重复入队、断网重试与多端广播都不会产生重复下载。
+ *
+ * 重试语义：
+ * - 下载：可重试错误（断网/429/5xx）保留任务，按指数退避（1s、2s、4s……上限 30s）
+ *   推迟 `nextAttemptAt`，不设次数上限；单次 drain 每个任务最多尝试一次。其余 4xx
+ *   视为业务拒绝，移除任务并回调 `onError`。
+ * - 上传：保持原语义（可立即重试、5 次上限、最终失败由调用方抛出）。
  */
 import { IMAGE_CONTENT_SHA256_HEADER, IMAGE_MIME_TYPE } from '@dafan/shared/sync';
 
@@ -34,6 +40,17 @@ interface QueueTask {
   readonly variant: Variant;
   readonly asset: ImageAssetRef;
   attempts: number;
+  /** 最早可再次处理的时间戳（毫秒）；上传恒为 0，下载失败后按退避推迟。 */
+  nextAttemptAt: number;
+}
+
+/** 下载重试退避：1s、2s、4s……上限 30s。 */
+const RETRY_BASE_MS = 1_000;
+const RETRY_MAX_MS = 30_000;
+
+function retryDelayMs(attempts: number): number {
+  const exp = Math.max(0, attempts - 1);
+  return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(exp, 20));
 }
 
 export interface ImageQueueOptions {
@@ -75,11 +92,35 @@ export class ImageSyncQueue {
     if (!/^[0-9a-f]{64}$/.test(asset.sha256)) return;
     const key = `${direction}:${asset.sha256}:${variant}`;
     if (this.tasks.has(key)) return;
-    this.tasks.set(key, { key, direction, variant, asset, attempts: 0 });
+    this.tasks.set(key, { key, direction, variant, asset, attempts: 0, nextAttemptAt: 0 });
   }
 
+  /** 队列任务总数（含等待重试的任务）。 */
   get pending(): number {
     return this.tasks.size;
+  }
+
+  /** 当前时刻可处理的任务数。 */
+  get due(): number {
+    const now = this.now();
+    let count = 0;
+    for (const task of this.tasks.values()) if (task.nextAttemptAt <= now) count += 1;
+    return count;
+  }
+
+  /** 最早到期任务的剩余毫秒；无任务返回 null。 */
+  nextRetryDelay(): number | null {
+    if (this.tasks.size === 0) return null;
+    const now = this.now();
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const task of this.tasks.values()) {
+      if (task.nextAttemptAt < earliest) earliest = task.nextAttemptAt;
+    }
+    return Math.max(0, earliest - now);
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
   }
 
   /** 串行处理队列；并发调用复用同一次处理。 */
@@ -97,13 +138,18 @@ export class ImageSyncQueue {
       downloaded: 0,
       failed: 0,
     };
-    const limit = Math.min(this.tasks.size, this.options.batchSize ?? 32);
-    let processed = 0;
-    while (this.tasks.size > 0 && processed < limit) {
-      const task = this.tasks.values().next().value as QueueTask | undefined;
-      if (!task) break;
+    // 只处理本轮开始时已到期的任务；每个任务本轮最多尝试一次。
+    const now = this.now();
+    const limit = this.options.batchSize ?? 32;
+    const batch: QueueTask[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.nextAttemptAt > now) continue;
+      batch.push(task);
+      if (batch.length >= limit) break;
+    }
+    for (const task of batch) {
+      if (this.tasks.get(task.key) !== task) continue;
       this.tasks.delete(task.key);
-      processed += 1;
       try {
         if (task.direction === 'upload') await this.upload(task);
         else await this.download(task);
@@ -113,14 +159,27 @@ export class ImageSyncQueue {
         result.failed += 1;
         result.error ??= error;
         task.attempts += 1;
-        // 网络/5xx/限流可重试；其余（4xx 业务拒绝）丢弃，避免无限重试放大。
-        if (task.attempts < 5 && isRetryable(error) && !this.tasks.has(task.key)) {
-          this.tasks.set(task.key, task);
+        if (task.direction === 'upload') {
+          // 上传保持原语义：可立即重试，5 次后由 uploadImages 抛出。
+          if (task.attempts < 5 && isRetryable(error)) this.retain(task);
+          this.options.onError?.(error, { key: task.key, direction: task.direction });
+          continue;
         }
+        if (isRetryable(error)) {
+          // 下载无次数上限：保留任务并按指数退避推迟，避免零延迟紧循环。
+          task.nextAttemptAt = this.now() + retryDelayMs(task.attempts);
+          this.retain(task);
+          continue;
+        }
+        // 其余 4xx 属于业务拒绝，丢弃并上报。
         this.options.onError?.(error, { key: task.key, direction: task.direction });
       }
     }
     return result;
+  }
+
+  private retain(task: QueueTask): void {
+    if (!this.tasks.has(task.key)) this.tasks.set(task.key, task);
   }
 
   private async upload(task: QueueTask): Promise<void> {
