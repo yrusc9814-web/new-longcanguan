@@ -208,11 +208,24 @@ export async function pushOutbox(options: PushOptions): Promise<PushResult> {
         const row = byId.get(rejection.operationId);
         if (!row) continue;
         const payload = row.payloadJson === null ? null : JSON.parse(row.payloadJson);
-        const chain = await dropOperationChain(tx, {
-          opId: row.opId,
-          entity: row.entity,
-          entityId: row.entityId,
-        });
+        // 与 DO 拒绝响应同口径：只有本批实际被回滚的同根后继才算「已丢弃」。
+        // 超出批次的同根操作留到后续推送，各自触发权威副根回灌，避免留下脏状态。
+        const rejectedAt = rows.findIndex((entry) => entry.opId === row.opId);
+        const batchChain = new Set(
+          rows
+            .slice(rejectedAt + 1)
+            .filter((entry) => entry.entity === row.entity && entry.entityId === row.entityId)
+            .map((entry) => entry.opId),
+        );
+        const chain = await dropOperationChain(
+          tx,
+          {
+            opId: row.opId,
+            entity: row.entity,
+            entityId: row.entityId,
+          },
+          { onlyOpIds: batchChain },
+        );
         conflicts.push({
           opId: row.opId,
           entity: row.entity,

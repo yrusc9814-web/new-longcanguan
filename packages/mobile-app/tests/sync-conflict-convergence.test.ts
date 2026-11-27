@@ -615,6 +615,49 @@ describe('conflict：整链回滚与权威集合', () => {
     ]);
     expect(await pendingOutbox(database, EPOCH, 10)).toHaveLength(0);
   });
+
+  it('被拒链只丢弃本批已回滚的后继操作，跨批次同根操作留待后续推送', async () => {
+    const database = await db();
+    await database.withWriteTransaction(async (tx) => {
+      for (const [index, version] of [1, 2, 3].entries()) {
+        await tx.enqueue({
+          opId: `batch-op-${index + 1}`,
+          entity: 'Recipe',
+          entityId: 'r-batch',
+          kind: 'upsert',
+          baseVersion: version,
+          payload: { id: 'r-batch', name: `本地 v${version + 1}`, version: version + 1 },
+        });
+      }
+    });
+    const client = http(async () =>
+      json(409, {
+        acceptedOperationIds: [],
+        acknowledgements: [],
+        rejected: [
+          {
+            operationId: 'batch-op-1',
+            code: 'VERSION_CONFLICT',
+            serverVersion: 2,
+            authoritative: [],
+          },
+        ],
+      }),
+    );
+    const result = await pushOutbox({
+      database,
+      http: client,
+      clientId: 'd',
+      epoch: EPOCH,
+      batchSize: 2,
+      maxBatches: 1,
+    });
+    expect(result.conflicts[0]!.chain.map((row) => row.opId)).toEqual(['batch-op-1', 'batch-op-2']);
+    // 第 3 条不在本批，服务端未回滚它；保留到下一轮由它自身触发权威副根回灌。
+    expect((await pendingOutbox(database, EPOCH, 10)).map((row) => row.opId)).toEqual([
+      'batch-op-3',
+    ]);
+  });
 });
 
 describe('pull：聚合父子同进退', () => {

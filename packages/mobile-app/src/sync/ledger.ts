@@ -586,14 +586,16 @@ export interface OutboxChainRow {
 }
 
 /**
- * 删除指定操作，以及同一实体的全部后继操作（版本链已断，后继必失败）。
+ * 删除指定操作，以及同一实体的后继操作（版本链已断，后继必失败）。
  *
- * 返回整条被丢弃操作链的明细：调用方据此把链上每个操作产生的本地副作用
- * （新建批次/日志、草稿记录、入库食材等）在同一个事务内一并回滚。
+ * `onlyOpIds` 限定只删本次请求批次里实际被服务端连带回滚的后继操作：
+ * 被拒批次只覆盖同批操作，超出批次的链上操作必须留到后续推送，
+ * 由服务端针对它们各自的载荷副根下发权威行，才能完整收敛。
  */
 export async function dropOperationChain(
   tx: WriteTransaction,
   target: { opId: string; entity: string; entityId: string },
+  options: { readonly onlyOpIds?: ReadonlySet<string> } = {},
 ): Promise<OutboxChainRow[]> {
   const [targetRow] = await tx.query<{ rowid: number }>(
     `SELECT rowid FROM "${SYNC_OUTBOX_TABLE}" WHERE "opId" = ?`,
@@ -605,10 +607,13 @@ export async function dropOperationChain(
       WHERE "entity" = ? AND "entityId" = ? AND rowid >= ? ORDER BY rowid`,
     [target.entity, target.entityId, targetRow?.rowid ?? 0],
   );
-  for (const row of rows) {
+  const dropped = options.onlyOpIds
+    ? rows.filter((row) => row.opId === target.opId || options.onlyOpIds?.has(row.opId))
+    : rows;
+  for (const row of dropped) {
     await tx.run(`DELETE FROM "${SYNC_OUTBOX_TABLE}" WHERE "opId" = ?`, [row.opId]);
   }
-  return rows.map(({ opId, entity, entityId, kind, commandType, baseVersion, payloadJson }) => ({
+  return dropped.map(({ opId, entity, entityId, kind, commandType, baseVersion, payloadJson }) => ({
     opId,
     entity,
     entityId,
